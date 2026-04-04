@@ -1,0 +1,104 @@
+"""Tool orchestrator for managing tool execution lifecycle."""
+from typing import Any, Optional
+
+from .context import ToolContext, ToolGate
+from .registry import Tool
+
+
+class ToolOrchestrator:
+    """Orchestrates tool execution with proper lifecycle management.
+
+    The orchestrator manages the complete execution flow of tools,
+    including pre-execution hooks, gate management for mutating operations,
+    and post-execution cleanup.
+
+    Example:
+        gate = ToolGate()
+        orchestrator = ToolOrchestrator(gate)
+        result = await orchestrator.execute(tool, args, context)
+    """
+
+    def __init__(self, gate: ToolGate):
+        """Initialize the orchestrator with a gate.
+
+        Args:
+            gate: The gate used to control mutating operations
+        """
+        self._gate = gate
+
+    async def execute(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        context: Optional[ToolContext] = None
+    ) -> Any:
+        """Execute a tool with full lifecycle management.
+
+        This method orchestrates the complete tool execution flow:
+        1. Calls tool.before_execute() for pre-execution setup
+        2. If tool.is_mutating, acquires the gate lock via context.gate.wait()
+        3. Calls tool.execute() to perform the actual operation
+        4. Calls tool.after_execute(result) for post-execution cleanup
+        5. If tool.is_mutating, releases the gate lock via context.gate.release()
+        6. Returns the execution result
+
+        Args:
+            tool: The tool instance to execute
+            args: Arguments to pass to the tool
+            context: Optional execution context. If not provided, a default
+                     context will be created with the gate attached.
+
+        Returns:
+            The result of the tool execution
+
+        Raises:
+            Exception: Any exception raised during tool execution is propagated
+                      after proper cleanup (gate release, after_execute)
+        """
+        # Create context if not provided
+        if context is None:
+            context = ToolContext(
+                tool_name=tool.name,
+                args=args,
+                gate=self._gate
+            )
+        elif context.gate is None:
+            context = context.with_gate(self._gate)
+
+        result: Any = None
+        gate_acquired = False
+
+        try:
+            # Step 1: Pre-execution hook
+            if hasattr(tool, "before_execute"):
+                await tool.before_execute(context=context)
+
+            # Step 2: Check if tool is mutating and acquire gate if needed
+            is_mutating = getattr(tool, "is_mutating", False)
+            if is_mutating and context.gate is not None:
+                await context.gate.wait(holder_id=tool.name)
+                gate_acquired = True
+
+            # Step 3: Execute the tool
+            result = await tool.execute(**args)
+
+            # Step 4: Post-execution hook
+            if hasattr(tool, "after_execute"):
+                await tool.after_execute(result, context=context)
+
+        finally:
+            # Step 5: Release gate if it was acquired
+            if gate_acquired and context.gate is not None:
+                await context.gate.release()
+
+        # Step 6: Return the result
+        return result
+
+    @property
+    def gate(self) -> ToolGate:
+        """Get the gate associated with this orchestrator.
+
+        Returns:
+            The ToolGate instance used by this orchestrator
+        """
+        return self._gate

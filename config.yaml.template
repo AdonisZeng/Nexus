@@ -1,0 +1,73 @@
+# Nexus 默认配置模板
+# 首次运行时会自动复制此文件为 config.yaml
+# api_key 使用 ${ENV_VAR} 语法，支持环境变量替换
+
+agent:
+  context_threshold: 80000
+  max_iterations: 10
+  max_retries: 3
+  planning: false
+  reasoning: true
+  timeout_seconds: 300
+  verification: true
+
+models:
+  # 默认provider
+  default: anthropic
+
+  # Anthropic Claude 系列
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+    model: claude-sonnet-4-20250514
+
+  # OpenAI GPT 系列
+  openai:
+    api_key: ${OPENAI_API_KEY}
+    model: gpt-4o
+
+  # Ollama 本地模型
+  ollama:
+    url: http://localhost:11434
+    model: llama3
+
+  # LM Studio 本地模型
+  lmstudio:
+    url: http://localhost:1234/v1
+    model: qwen/qwen3.5-35b-a3b
+
+  # MiniMax API
+  minimax:
+    api_key: ${MINIMAX_API_KEY}
+    base_url: https://api.minimaxi.com/anthropic
+    api_protocol: anthropic
+    model: MiniMax-M2.7
+
+  # xAI Grok 系列
+  xai:
+    api_key: ${XAI_API_KEY}
+    base_url: https://api.x.ai/v1
+    model: grok-2
+
+  # 自定义 API (Volcengine)
+  custom:
+    api_key: ${CUSTOM_API_KEY}
+    base_url: https://ark.cn-beijing.volces.com/api/coding
+    api_protocol: anthropic
+    model: Kimi-K2.5
+
+output:
+  mode: cli
+  verbose: true
+
+service:
+  host: 127.0.0.1
+  port: 7860
+
+system_prompt: 'You are Nexus, a helpful AI assistant.
+
+  You have access to various tools to help you complete tasks.
+
+  When you need to use a tool, use the tool_calls format.'
+
+mcp:
+  servers: []
