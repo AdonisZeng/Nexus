@@ -17,6 +17,25 @@ import argparse
 import sys
 from pathlib import Path
 
+
+def get_exe_dir() -> Path:
+    """Get the directory where the exe/script is located
+
+    @return exe 或脚本所在目录路径
+    """
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+def get_default_config_path() -> str:
+    """Get default config path based on running mode
+
+    @return 配置文件的默认路径
+    """
+    return str(get_exe_dir() / "config.yaml")
+
+
 # Bootstrap for PyInstaller exe - MUST be before other imports
 if getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).parent))
@@ -43,14 +62,15 @@ def main():
 
     parser = argparse.ArgumentParser(description="Nexus - Personal AI Agent")
     parser.add_argument("task", nargs="?", help="要执行的任务")
-    parser.add_argument("--config", type=str, default="config.yaml", help="配置文件路径")
+    parser.add_argument("--config", type=str, default=None, help="配置文件路径")
     parser.add_argument("--model", choices=["anthropic", "openai", "ollama", "lmstudio", "custom"], help="使用的模型")
     args = parser.parse_args()
 
     logger.debug(f"命令行参数: {vars(args)}")
 
-    config = load_config(args.config)
-    logger.info(f"配置加载完成: {args.config}")
+    config_path = args.config if args.config else get_default_config_path()
+    config = load_config(config_path)
+    logger.info(f"配置加载完成: {config_path}")
 
     if args.model:
         config.setdefault("models", {})["default"] = args.model
