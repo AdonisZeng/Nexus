@@ -15,7 +15,7 @@ from src.adapters import create_adapter, set_current_adapter
 from src.tools import ToolRegistry
 from src.skills import SkillRegistry
 from src.mcp import MCPClient, MCPServerConfig
-from src.context import MemoryManager, get_user_memory_dir
+from src.context import MemoryManager, get_user_memory_dir, NexusMDLoader, AutoMemoryManager
 from src.cli.completion import create_input_session, get_input_async as comp_get_input_async
 from src.cli.rich_ui import (
     print_init_info,
@@ -155,6 +155,7 @@ class NexusCLI:
         self.system_prompt = None
         # Memory management
         self.memory_manager = MemoryManager()
+        self.auto_memory_manager = AutoMemoryManager()
         self.session_id = str(uuid.uuid4())
         self.current_title = "新对话"
         # Input session for command completion
@@ -456,9 +457,26 @@ class NexusCLI:
         # 添加命令列表到 system prompt
         commands_info = self._build_commands_prompt()
 
+        # 加载 NEXUS.md 内容（项目知识）
+        nexus_content = NexusMDLoader.load_and_merge(Path(self.cwd))
+        nexus_section = ""
+        if nexus_content:
+            nexus_section = f"""
+## 项目知识 (NEXUS.md)
+{nexus_content}
+"""
+
+        # 加载近期记忆
+        memories_section = ""
+        if hasattr(self, 'auto_memory_manager'):
+            memories_section = self.auto_memory_manager.get_memories_section(limit=5)
+            if memories_section:
+                memories_section = f"\n{memories_section}\n"
+
         # 合并到 system_prompt
         base_prompt = self.config.get("system_prompt", "You are Nexus, a helpful AI assistant.")
-        parts = [base_prompt, time_info, workspace_info, commands_info, skills_dir_info, tools_prompt, skills_prompt]
+        parts = [base_prompt, time_info, workspace_info, commands_info,
+                 skills_dir_info, tools_prompt, nexus_section, memories_section, skills_prompt]
         self.system_prompt = "\n\n".join([p for p in parts if p])
 
     def _build_commands_prompt(self) -> str:
@@ -1146,6 +1164,16 @@ class NexusCLI:
                             self.messages,
                             self.current_title
                         )
+                        # Auto Memory: let LLM decide what to remember
+                        if len(self.messages) > 4:
+                            try:
+                                count = await self.auto_memory_manager.process_session(
+                                    self.messages, self.session_id, self.model_adapter
+                                )
+                                if count > 0:
+                                    logger.info(f"Auto Memory: saved {count} memories")
+                            except Exception as e:
+                                logger.warning(f"Auto Memory: failed: {e}")
                         console.print(f"\n[dim]会话已保存:[/dim] {self.memory_manager.memory_dir / f'{self.session_id}.md'}")
                     console.print("\n[cyan]再见![/cyan]")
                     break
@@ -1183,6 +1211,16 @@ class NexusCLI:
                             self.messages,
                             self.current_title
                         )
+                        # Auto Memory
+                        if len(self.messages) > 4:
+                            try:
+                                count = await self.auto_memory_manager.process_session(
+                                    self.messages, self.session_id, self.model_adapter
+                                )
+                                if count > 0:
+                                    logger.info(f"Auto Memory: saved {count} memories")
+                            except Exception as e:
+                                logger.warning(f"Auto Memory: failed: {e}")
                         print_saved(str(self.memory_manager.memory_dir / f'{self.session_id}.md'))
                     console.print("[cyan]再见![/cyan]")
                     break
@@ -1226,6 +1264,16 @@ class NexusCLI:
                             self.messages,
                             self.current_title
                         )
+                        # Auto Memory
+                        if len(self.messages) > 4:
+                            try:
+                                count = await self.auto_memory_manager.process_session(
+                                    self.messages, self.session_id, self.model_adapter
+                                )
+                                if count > 0:
+                                    logger.info(f"Auto Memory: saved {count} memories")
+                            except Exception as e:
+                                logger.warning(f"Auto Memory: failed: {e}")
                         console.print("[dim]会话已保存[/dim]")
                     self.messages = []
                     self.session_id = str(uuid.uuid4())
@@ -1247,6 +1295,16 @@ class NexusCLI:
                         self.messages,
                         self.current_title
                     )
+                    # Auto Memory
+                    if len(self.messages) > 4:
+                        try:
+                            count = await self.auto_memory_manager.process_session(
+                                self.messages, self.session_id, self.model_adapter
+                            )
+                            if count > 0:
+                                logger.info(f"Auto Memory: saved {count} memories")
+                        except Exception as e:
+                            logger.warning(f"Auto Memory: failed: {e}")
                     console.print(f"\n[dim]会话已保存:[/dim] {self.memory_manager.memory_dir / f'{self.session_id}.md'}")
                 console.print("\n[cyan]再见![/cyan]")
                 break
@@ -1275,6 +1333,16 @@ class NexusCLI:
                 self.messages,
                 self.current_title
             )
+            # Auto Memory
+            if len(self.messages) > 4 and hasattr(self, 'auto_memory_manager'):
+                try:
+                    count = await self.auto_memory_manager.process_session(
+                        self.messages, self.session_id, self.model_adapter
+                    )
+                    if count > 0:
+                        logger.info(f"Auto Memory: saved {count} memories")
+                except Exception as e:
+                    logger.warning(f"Auto Memory: failed: {e}")
         await self.mcp_client.disconnect_all()
 
     def _list_sessions(self) -> None:

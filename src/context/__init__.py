@@ -30,6 +30,8 @@ from .core import (
     MemoryManager,
     get_user_memory_dir,
 )
+from .nexus_md import NexusMDLoader, NexusMD, NexusMDMetadata
+from .auto_memory import AutoMemoryManager, MemoryEntry
 
 __all__ = [
     "ContextMessage",
@@ -44,4 +46,10 @@ __all__ = [
     "get_user_memory_dir",
     "create_context",
     "from_messages_list",
+    # New for Phase 1
+    "NexusMDLoader",
+    "NexusMD",
+    "NexusMDMetadata",
+    "AutoMemoryManager",
+    "MemoryEntry",
 ]
