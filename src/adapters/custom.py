@@ -5,6 +5,7 @@ from typing import Any, List, Optional, AsyncIterator
 import asyncio
 import httpx
 import json
+import os
 import re
 
 from src.utils import get_logger
@@ -232,7 +233,7 @@ class CustomAdapter(ModelAdapter):
         super().__init__(model=model, compat=compat)
 
         self.base_url = base_url.rstrip("/") if base_url else "https://api.openai.com/v1"
-        self.api_key = api_key
+        self.api_key = api_key or os.environ.get("CUSTOM_API_KEY")
         self.api_protocol = api_protocol.lower() if api_protocol else "openai"
         self.max_retries = max_retries
         self.retry_delay = retry_delay

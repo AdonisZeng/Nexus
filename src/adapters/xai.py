@@ -10,6 +10,7 @@ from .errors import (
 from typing import List
 import httpx
 import json
+import os
 
 from src.utils import get_logger
 
@@ -65,7 +66,7 @@ class XAIAdapter(ModelAdapter):
         """
         super().__init__(model=model, compat=compat)
 
-        self.api_key = api_key
+        self.api_key = api_key or os.environ.get("XAI_API_KEY")
         self.base_url = base_url.rstrip("/")
         self._client = None
 

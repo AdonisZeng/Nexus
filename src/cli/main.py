@@ -213,11 +213,12 @@ class NexusCLI(ModelProvider):
 
         if default_model in ("minimax",):
             # minimax is a preset of custom with specific settings
+            import os
+            from src.adapters.custom import CustomAdapter
             minimax_config = model_config.get("minimax", {})
-            return create_adapter(
-                "custom",
+            return CustomAdapter(
                 base_url=minimax_config.get("base_url", "https://api.minimaxi.com/anthropic"),
-                api_key=minimax_config.get("api_key"),
+                api_key=minimax_config.get("api_key") or os.environ.get("MINIMAX_API_KEY"),
                 model=minimax_config.get("model", "MiniMax-M2.7"),
                 compat=minimax_config.get("compat"),
                 api_protocol="anthropic"
@@ -814,20 +815,11 @@ class NexusCLI(ModelProvider):
 
             # Final response
             if response:
-                yield AgentEvent(EventType.OUTPUT, response)
+                # 流式响应已经在 _execute_task_streaming 中实时输出了
+                # 这里只需要记录到消息历史，不需要再次输出
+                if not use_streaming:
+                    yield AgentEvent(EventType.OUTPUT, response)
                 self.messages.append({"role": "assistant", "content": response})
-
-            # Check if task was actually completed when model stopped (regardless of stop_reason)
-            if not tool_calls:
-                # Model stopped and no tool_calls - verify if task was actually completed
-                logger.info(f"[execute_task] 模型停止 (stop_reason={last_stop_reason})，发送确认请求")
-                task_completed = await self._confirm_task_completion(response)
-                if not task_completed:
-                    logger.warning(f"[execute_task] 任务可能未完成：stop_reason={last_stop_reason}")
-                    yield AgentEvent(
-                        EventType.WARNING,
-                        f"任务可能未完成：stop_reason={last_stop_reason}"
-                    )
 
             yield AgentEvent(EventType.DONE, "任务完成")
 
@@ -1679,7 +1671,7 @@ async def main():
         config.setdefault("models", {})["default"] = args.model
 
     # Create and run CLI
-    cli = NexusCLI(config, args.config)
+    cli = NexusCLI(config, config_path)
 
     # Create a task that can be cancelled
     async def run_cli():

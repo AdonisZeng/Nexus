@@ -1,4 +1,5 @@
 """Configuration loader with environment variable support"""
+import copy
 import os
 import re
 from pathlib import Path
@@ -7,6 +8,9 @@ import yaml
 from src.utils import get_logger
 
 logger = get_logger("config")
+
+# 敏感字段列表，保存时会被自动移除
+SENSITIVE_FIELDS = {"api_key"}
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -50,10 +54,29 @@ def load_config(config_path: str = "config.yaml") -> dict:
     return config
 
 
+def _remove_sensitive_fields(obj):
+    """递归移除敏感字段
+
+    @param obj 要处理的对象
+    @return 移除敏感字段后的对象
+    """
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            if k in SENSITIVE_FIELDS:
+                continue
+            result[k] = _remove_sensitive_fields(v)
+        return result
+    elif isinstance(obj, list):
+        return [_remove_sensitive_fields(item) for item in obj]
+    return obj
+
+
 def save_config(config: dict, config_path: str = "config.yaml") -> bool:
     """Save configuration dictionary to YAML file
 
-    Preserves ${VAR} environment variable syntax in the original file.
+    自动移除敏感字段（如 api_key），避免将实际密钥写入配置文件。
+    适配器会从环境变量读取这些值。
 
     @param config Configuration dictionary to save
     @param config_path Path to the configuration file
@@ -61,9 +84,12 @@ def save_config(config: dict, config_path: str = "config.yaml") -> bool:
     """
     logger.debug(f"保存配置文件 | path={config_path} | keys={list(config.keys())}")
     try:
+        # 创建副本并移除敏感字段
+        config_to_save = _remove_sensitive_fields(copy.deepcopy(config))
+
         path = Path(config_path)
         with open(path, 'w', encoding='utf-8') as f:
-            yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True)
+            yaml.safe_dump(config_to_save, f, default_flow_style=False, allow_unicode=True)
         logger.info(f"配置保存成功 | path={config_path}")
         return True
     except Exception as e:

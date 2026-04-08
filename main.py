@@ -77,7 +77,7 @@ def main():
         logger.info(f"模型设置为: {args.model}")
 
     logger.info("启动模式: CLI")
-    cli = NexusCLI(config)
+    cli = NexusCLI(config, config_path)
     try:
         asyncio.run(cli.initialize())
         if args.task:

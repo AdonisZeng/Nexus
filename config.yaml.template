@@ -1,6 +1,12 @@
 # Nexus 默认配置模板
 # 首次运行时会自动复制此文件为 config.yaml
-# api_key 使用 ${ENV_VAR} 语法，支持环境变量替换
+# API Key 通过环境变量配置，不再需要在配置文件中指定
+# 各 provider 对应的环境变量名：
+#   - Anthropic: ANTHROPIC_API_KEY
+#   - OpenAI: OPENAI_API_KEY
+#   - MiniMax: MINIMAX_API_KEY
+#   - xAI: XAI_API_KEY
+#   - Custom: CUSTOM_API_KEY
 
 agent:
   context_threshold: 80000
@@ -16,13 +22,13 @@ models:
   default: anthropic
 
   # Anthropic Claude 系列
+  # 环境变量: ANTHROPIC_API_KEY
   anthropic:
-    api_key: ${ANTHROPIC_API_KEY}
     model: claude-sonnet-4-20250514
 
   # OpenAI GPT 系列
+  # 环境变量: OPENAI_API_KEY
   openai:
-    api_key: ${OPENAI_API_KEY}
     model: gpt-4o
 
   # Ollama 本地模型
@@ -36,21 +42,21 @@ models:
     model: qwen/qwen3.5-35b-a3b
 
   # MiniMax API
+  # 环境变量: MINIMAX_API_KEY
   minimax:
-    api_key: ${MINIMAX_API_KEY}
     base_url: https://api.minimaxi.com/anthropic
     api_protocol: anthropic
     model: MiniMax-M2.7
 
   # xAI Grok 系列
+  # 环境变量: XAI_API_KEY
   xai:
-    api_key: ${XAI_API_KEY}
     base_url: https://api.x.ai/v1
     model: grok-2
 
   # 自定义 API (Volcengine)
+  # 环境变量: CUSTOM_API_KEY
   custom:
-    api_key: ${CUSTOM_API_KEY}
     base_url: https://ark.cn-beijing.volces.com/api/coding
     api_protocol: anthropic
     model: Kimi-K2.5
