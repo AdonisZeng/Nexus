@@ -118,6 +118,19 @@ class StreamingToolCallBuffer:
 class ModelAdapter(ABC):
     """Base class for model adapters"""
 
+    # Provider name - set in subclass to auto-register
+    PROVIDER_NAME: str = None
+
+    def __init_subclass__(cls, **kwargs):
+        """Auto-register adapter when subclassed.
+
+        If subclass has PROVIDER_NAME set, it auto-registers to AdapterRegistry.
+        """
+        super().__init_subclass__(**kwargs)
+        if hasattr(cls, 'PROVIDER_NAME') and cls.PROVIDER_NAME:
+            from .registry import AdapterRegistry
+            AdapterRegistry.register(cls.PROVIDER_NAME, cls)
+
     def __init__(
         self,
         model: str = None,

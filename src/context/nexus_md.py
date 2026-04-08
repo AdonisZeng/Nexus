@@ -64,7 +64,7 @@ class NexusMDLoader:
     @classmethod
     def parse(cls, file_path: Path) -> Optional[NexusMD]:
         """Parse a single NEXUS.md file."""
-        if not file_path.exists():
+        if file_path is None or not file_path.exists():
             return None
 
         content = file_path.read_text(encoding="utf-8")

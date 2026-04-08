@@ -16,6 +16,17 @@ import httpx
 class OpenAIAdapter(ModelAdapter):
     """Adapter for OpenAI models"""
 
+    PROVIDER_NAME = "openai"
+
+    @classmethod
+    def from_config(cls, config: dict):
+        """Create adapter from config dict."""
+        return cls(
+            api_key=config.get("api_key"),
+            model=config.get("model", "gpt-4o"),
+            compat=config.get("compat"),
+        )
+
     def __init__(
         self,
         api_key: str = None,

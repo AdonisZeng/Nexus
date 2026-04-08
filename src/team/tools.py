@@ -294,47 +294,37 @@ team(action="list_tasks", team_name="my-team")
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        """Execute team action"""
+        """Execute team action using dict-based dispatch."""
         action = kwargs.get("action")
 
-        if action == "create":
-            return await self._create_team(**kwargs)
-        elif action == "send":
-            return await self._send_message(**kwargs)
-        elif action == "broadcast":
-            return await self._broadcast(**kwargs)
-        elif action == "status":
-            return await self._get_status(**kwargs)
-        elif action == "shutdown":
-            return await self._shutdown_team(**kwargs)
-        elif action == "await":
-            return await self._await_completion(**kwargs)
-        elif action == "approve":
-            return await self._approve(**kwargs)
-        elif action == "add_task":
-            return await self._add_task(**kwargs)
-        elif action == "list_tasks":
-            return await self._list_tasks(**kwargs)
-        elif action == "spawn_autonomous":
-            return await self._spawn_autonomous(**kwargs)
-        elif action == "generate_spec":
-            return await self._generate_spec(**kwargs)
-        elif action == "todo":
-            return await self._manage_todo(**kwargs)
-        elif action == "worktree_create":
-            return await self._worktree_create(**kwargs)
-        elif action == "worktree_list":
-            return await self._worktree_list(**kwargs)
-        elif action == "worktree_bind":
-            return await self._worktree_bind(**kwargs)
-        elif action == "worktree_run":
-            return await self._worktree_run(**kwargs)
-        elif action == "worktree_remove":
-            return await self._worktree_remove(**kwargs)
-        elif action == "worktree_events":
-            return await self._worktree_events(**kwargs)
-        else:
-            return f"Error: Unknown action '{action}'. Valid actions: create, send, broadcast, status, shutdown, await, approve, add_task, list_tasks, spawn_autonomous, complete_task, generate_spec, todo, worktree_create, worktree_list, worktree_bind, worktree_run, worktree_remove, worktree_events"
+        handler = self._HANDLERS.get(action)
+        if not handler:
+            valid_actions = ", ".join(sorted(self._HANDLERS.keys()))
+            return f"Error: Unknown action '{action}'. Valid actions: {valid_actions}"
+
+        return await handler(**kwargs)
+
+    # Action handlers dict - maps action name to handler method
+    _HANDLERS = {
+        "create": lambda self, **kw: self._create_team(**kw),
+        "send": lambda self, **kw: self._send_message(**kw),
+        "broadcast": lambda self, **kw: self._broadcast(**kw),
+        "status": lambda self, **kw: self._get_status(**kw),
+        "shutdown": lambda self, **kw: self._shutdown_team(**kw),
+        "await": lambda self, **kw: self._await_completion(**kw),
+        "approve": lambda self, **kw: self._approve(**kw),
+        "add_task": lambda self, **kw: self._add_task(**kw),
+        "list_tasks": lambda self, **kw: self._list_tasks(**kw),
+        "spawn_autonomous": lambda self, **kw: self._spawn_autonomous(**kw),
+        "generate_spec": lambda self, **kw: self._generate_spec(**kw),
+        "todo": lambda self, **kw: self._manage_todo(**kw),
+        "worktree_create": lambda self, **kw: self._worktree_create(**kw),
+        "worktree_list": lambda self, **kw: self._worktree_list(**kw),
+        "worktree_bind": lambda self, **kw: self._worktree_bind(**kw),
+        "worktree_run": lambda self, **kw: self._worktree_run(**kw),
+        "worktree_remove": lambda self, **kw: self._worktree_remove(**kw),
+        "worktree_events": lambda self, **kw: self._worktree_events(**kw),
+    }
 
     async def _create_team(self, **kwargs) -> str:
         """Create an empty team for autonomous mode"""
@@ -771,6 +761,14 @@ team(action="list_tasks", team_name="my-team")
                 teammate.worktree_path = worktree_path
                 teammate.set_work_root(work_root)
             self._active_teammates[f"{team_name}:{name}"] = teammate
+
+            # Immediately add member to panel state so they appear in UI from the start
+            if team_name in self._panel_state:
+                state = self._panel_state[team_name]
+                if name not in state.members:
+                    state.members[name] = MemberProgress()
+                    logger.info(f"[TeamTool] Added '{name}' to panel state members (total: {len(state.members)})")
+
             asyncio.create_task(self._start_teammate_with_task(teammate, task))
 
             logger.info(f"[TeamTool] Member '{name}' is polling task board for work...")
@@ -925,6 +923,14 @@ team(action="list_tasks", team_name="my-team")
         task_board = self._task_boards[team_name]
         task = task_board.add_task(subject, description, blocked_by, spec_file)
         logger.info(f"[TeamTool] Task ##{task.id}: {task.subject} added to team '{team_name}' (blocked_by: {blocked_by})")
+
+        # Refresh task board cache immediately when tasks are added
+        self._refresh_task_board_cache(team_name)
+        # Trigger render if panel is active
+        if team_name in self._panel_state:
+            current_time = time.time()
+            if current_time - self._panel_state[team_name].last_throttle_time >= self._THROTTLE_INTERVAL:
+                self._render_panel(team_name)
 
         spec_info = f" (spec: {spec_file})" if spec_file else ""
         return f"Task added: #{task.id} - {task.subject}{spec_info}"

@@ -38,18 +38,6 @@ PATH_REQUIRING_TOOLS = {
 READ_ONLY_TOOLS = {"file_read", "file_search", "list_dir"}
 
 
-class IdleException(Exception):
-    """Raised when teammate enters idle state to break out of agent loop.
-
-    This exception is used to cleanly exit the agent loop when a teammate
-    has no more work and is entering idle polling mode. The idle message is
-    added to the context separately, and the loop returns empty string.
-    """
-    def __init__(self, message: str):
-        self.message = message
-        super().__init__(self.message)
-
-
 class Teammate:
     """Persistent teammate agent with lifecycle management
 
@@ -286,7 +274,7 @@ class Teammate:
         the idle tool which triggers early return.
         """
         # Deferred import to avoid circular dependency
-        from src.agent.loop import AgentLoop
+        from src.agent.loop import AgentLoop, IdleException
 
         max_iterations = 20
         timeout_seconds = 300.0
@@ -336,11 +324,11 @@ class Teammate:
                 # Handle idle tool - raises IdleException to break out of loop
                 if tool_name == "idle":
                     logger.info(f"Teammate {self.name} requested idle")
-                    self._idle_requested = True
                     idle_result_msg = ("进入空闲状态。将每5秒检查任务板和收件箱，最多等待60秒。"
                                       "如果有未完成的任务，请先完成它们。")
                     context.add_tool_message(idle_result_msg, "idle")
                     # Raise IdleException to break out of the agent loop cleanly
+                    # AgentLoop.run() will catch this and set loop._idle_requested = True
                     raise IdleException(idle_result_msg)
 
                 try:
@@ -360,8 +348,8 @@ class Teammate:
 
         try:
             result = await loop.run(execute_fn)
-            # If idle was requested, return empty string (task is suspended, not completed)
-            if self._idle_requested:
+            # Check loop.idle_requested since IdleException is caught by loop.run()
+            if loop.idle_requested:
                 return ""
             return result
         except IdleException as e:

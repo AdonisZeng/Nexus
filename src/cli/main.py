@@ -11,7 +11,7 @@ from collections import deque
 
 from src.agent import AgentEvent, EventType, ToolDefinition, ToolResult
 from src.config import load_config, save_config, update_provider_config, set_default_provider, get_configured_providers
-from src.adapters import create_adapter, set_current_adapter
+from src.adapters import create_adapter, set_current_adapter, ModelProvider, AdapterRegistry
 from src.tools import ToolRegistry
 from src.skills import SkillRegistry
 from src.mcp import MCPClient, MCPServerConfig
@@ -139,13 +139,28 @@ def print_event(event: AgentEvent):
         print_done(event.content)
 
 
-class NexusCLI:
-    """Main CLI class"""
+class NexusCLI(ModelProvider):
+    """Main CLI class implementing ModelProvider for dependency injection."""
 
     def __init__(self, config: dict):
         self.config = config
         self.model_adapter = None
+
+    # ModelProvider interface implementation
+    def get_adapter(self):
+        """Get the current model adapter."""
+        return self.model_adapter
+
+    def set_adapter(self, adapter):
+        """Set the current model adapter."""
+        self.model_adapter = adapter
+        # Also set global for backward compatibility (Teammate, etc.)
+        set_current_adapter(adapter)
         self.tool_registry = ToolRegistry()
+        # Inject self as ModelProvider into SubagentTool
+        subagent_tool = self.tool_registry.get('subagent')
+        if subagent_tool:
+            subagent_tool._provider = self
         self.skill_registry = SkillRegistry()
         self.mcp_client = MCPClient()
         # Register TeamTool to this instance's registry
@@ -184,54 +199,21 @@ class NexusCLI:
         # Nag Reminder mechanism - 跟踪自上次 todo 工具调用以来的轮次
         self.rounds_since_todo = 0
 
-    async def initialize(self):
-        """Initialize the CLI"""
-        self.cwd = str(Path.cwd())
-        # Create model adapter
-        model_config = self.config.get("models", {})
+    def _create_model_adapter(self, model_config: dict) -> "ModelAdapter":
+        """Create model adapter based on config.
+
+        Args:
+            model_config: Full models config dict
+
+        Returns:
+            Model adapter instance
+        """
         default_model = model_config.get("default", "anthropic")
 
-        if default_model == "anthropic":
-            self.model_adapter = create_adapter(
-                "anthropic",
-                api_key=model_config.get("anthropic", {}).get("api_key"),
-                model=model_config.get("anthropic", {}).get("model", "claude-sonnet-4-20250514"),
-                compat=model_config.get("anthropic", {}).get("compat")
-            )
-        elif default_model == "openai":
-            self.model_adapter = create_adapter(
-                "openai",
-                api_key=model_config.get("openai", {}).get("api_key"),
-                model=model_config.get("openai", {}).get("model", "gpt-4o"),
-                compat=model_config.get("openai", {}).get("compat")
-            )
-        elif default_model == "ollama":
-            self.model_adapter = create_adapter(
-                "ollama",
-                base_url=model_config.get("ollama", {}).get("url", "http://localhost:11434"),
-                model=model_config.get("ollama", {}).get("model", "llama3"),
-                compat=model_config.get("ollama", {}).get("compat")
-            )
-        elif default_model == "lmstudio":
-            self.model_adapter = create_adapter(
-                "lmstudio",
-                base_url=model_config.get("lmstudio", {}).get("url", "http://localhost:1234/v1"),
-                model=model_config.get("lmstudio", {}).get("model"),
-                compat=model_config.get("lmstudio", {}).get("compat")
-            )
-        elif default_model == "custom":
-            custom_config = model_config.get("custom", {})
-            self.model_adapter = create_adapter(
-                "custom",
-                base_url=custom_config.get("base_url", "https://api.openai.com/v1"),
-                api_key=custom_config.get("api_key"),
-                model=custom_config.get("model"),
-                compat=custom_config.get("compat"),
-                api_protocol=custom_config.get("api_protocol", "openai")
-            )
-        elif default_model == "minimax":
+        if default_model in ("minimax",):
+            # minimax is a preset of custom with specific settings
             minimax_config = model_config.get("minimax", {})
-            self.model_adapter = create_adapter(
+            return create_adapter(
                 "custom",
                 base_url=minimax_config.get("base_url", "https://api.minimaxi.com/anthropic"),
                 api_key=minimax_config.get("api_key"),
@@ -239,19 +221,19 @@ class NexusCLI:
                 compat=minimax_config.get("compat"),
                 api_protocol="anthropic"
             )
-        elif default_model == "xai":
-            xai_config = model_config.get("xai", {})
-            self.model_adapter = create_adapter(
-                "custom",
-                base_url=xai_config.get("base_url", "https://api.x.ai/v1"),
-                api_key=xai_config.get("api_key"),
-                model=xai_config.get("model", "grok-2"),
-                compat=xai_config.get("compat"),
-                api_protocol="openai"
-            )
+
+        # All other providers use registry
+        return AdapterRegistry.create(default_model, model_config)
+
+    async def initialize(self):
+        """Initialize the CLI"""
+        self.cwd = str(Path.cwd())
+        # Create model adapter
+        model_config = self.config.get("models", {})
+        self.model_adapter = self._create_model_adapter(model_config)
 
         # Set current adapter for subagent access
-        set_current_adapter(self.model_adapter)
+        self.set_adapter(self.model_adapter)
 
         # Connect MCP servers (non-blocking, background)
         self._mcp_connection_task = asyncio.create_task(self._connect_mcp_servers())
@@ -1659,69 +1641,10 @@ class NexusCLI:
         @details 根据当前配置重新创建模型适配器
         """
         model_config = self.config.get("models", {})
-        default_model = model_config.get("default", "anthropic")
-
-        if default_model == "anthropic":
-            self.model_adapter = create_adapter(
-                "anthropic",
-                api_key=model_config.get("anthropic", {}).get("api_key"),
-                model=model_config.get("anthropic", {}).get("model", "claude-sonnet-4-20250514"),
-                compat=model_config.get("anthropic", {}).get("compat")
-            )
-        elif default_model == "openai":
-            self.model_adapter = create_adapter(
-                "openai",
-                api_key=model_config.get("openai", {}).get("api_key"),
-                model=model_config.get("openai", {}).get("model", "gpt-4o"),
-                compat=model_config.get("openai", {}).get("compat")
-            )
-        elif default_model == "ollama":
-            self.model_adapter = create_adapter(
-                "ollama",
-                base_url=model_config.get("ollama", {}).get("url", "http://localhost:11434"),
-                model=model_config.get("ollama", {}).get("model", "llama3"),
-                compat=model_config.get("ollama", {}).get("compat")
-            )
-        elif default_model == "lmstudio":
-            self.model_adapter = create_adapter(
-                "lmstudio",
-                base_url=model_config.get("lmstudio", {}).get("url", "http://localhost:1234/v1"),
-                model=model_config.get("lmstudio", {}).get("model"),
-                compat=model_config.get("lmstudio", {}).get("compat")
-            )
-        elif default_model == "custom":
-            custom_config = model_config.get("custom", {})
-            self.model_adapter = create_adapter(
-                "custom",
-                base_url=custom_config.get("base_url", "https://api.openai.com/v1"),
-                api_key=custom_config.get("api_key"),
-                model=custom_config.get("model"),
-                compat=custom_config.get("compat"),
-                api_protocol=custom_config.get("api_protocol", "openai")
-            )
-        elif default_model == "minimax":
-            minimax_config = model_config.get("minimax", {})
-            self.model_adapter = create_adapter(
-                "custom",
-                base_url=minimax_config.get("base_url", "https://api.minimaxi.com/anthropic"),
-                api_key=minimax_config.get("api_key"),
-                model=minimax_config.get("model", "MiniMax-M2.7"),
-                compat=minimax_config.get("compat"),
-                api_protocol="anthropic"
-            )
-        elif default_model == "xai":
-            xai_config = model_config.get("xai", {})
-            self.model_adapter = create_adapter(
-                "custom",
-                base_url=xai_config.get("base_url", "https://api.x.ai/v1"),
-                api_key=xai_config.get("api_key"),
-                model=xai_config.get("model", "grok-2"),
-                compat=xai_config.get("compat"),
-                api_protocol="openai"
-            )
+        self.model_adapter = self._create_model_adapter(model_config)
 
         # Update current adapter for subagent access
-        set_current_adapter(self.model_adapter)
+        self.set_adapter(self.model_adapter)
 
         console.print(f"[green]已切换到模型: {self.model_adapter.get_name()}[/green]")
 

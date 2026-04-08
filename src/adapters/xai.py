@@ -37,6 +37,18 @@ class XAIAdapter(ModelAdapter):
     handling of tool call arguments that may be HTML-encoded.
     """
 
+    PROVIDER_NAME = "xai"
+
+    @classmethod
+    def from_config(cls, config: dict):
+        """Create adapter from config dict."""
+        return cls(
+            api_key=config.get("api_key"),
+            base_url=config.get("base_url", "https://api.x.ai/v1"),
+            model=config.get("model", "grok-2"),
+            compat=config.get("compat"),
+        )
+
     def __init__(
         self,
         api_key: str = None,

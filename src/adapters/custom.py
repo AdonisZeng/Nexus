@@ -193,6 +193,21 @@ class CustomAdapter(ModelAdapter):
     - "anthropic": Anthropic Messages API format
     """
 
+    PROVIDER_NAME = "custom"
+
+    @classmethod
+    def from_config(cls, config: dict):
+        """Create adapter from config dict."""
+        return cls(
+            base_url=config.get("base_url", "https://api.openai.com/v1"),
+            api_key=config.get("api_key"),
+            model=config.get("model"),
+            compat=config.get("compat"),
+            api_protocol=config.get("api_protocol", "openai"),
+            max_retries=config.get("max_retries", 3),
+            retry_delay=config.get("retry_delay", 1.0),
+        )
+
     def __init__(
         self,
         base_url: str = "https://api.openai.com/v1",

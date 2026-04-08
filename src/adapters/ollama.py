@@ -22,6 +22,17 @@ class OllamaAdapter(ModelAdapter):
     to prompt injection if enabled.
     """
 
+    PROVIDER_NAME = "ollama"
+
+    @classmethod
+    def from_config(cls, config: dict):
+        """Create adapter from config dict."""
+        return cls(
+            base_url=config.get("url", "http://localhost:11434"),
+            model=config.get("model", "llama3"),
+            compat=config.get("compat"),
+        )
+
     def __init__(
         self,
         base_url: str = "http://localhost:11434",

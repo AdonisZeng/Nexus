@@ -1,12 +1,15 @@
 """Subagent tool - allows main agent to invoke subagents"""
 import asyncio
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from src.tools.registry import Tool
 from src.tools.subagent.registry import SubagentRegistry
 from src.tools.subagent.runner import SubagentRunner
 from src.tools.subagent.models import SubagentResult
 from src.utils import get_logger
+
+if TYPE_CHECKING:
+    from src.adapters.provider import ModelProvider
 
 logger = get_logger("subagent.tool")
 
@@ -28,8 +31,13 @@ class SubagentTool(Tool):
     is_mutating = False
     requires_approval = False
 
-    def __init__(self, registry: Optional[SubagentRegistry] = None):
+    def __init__(
+        self,
+        registry: Optional[SubagentRegistry] = None,
+        provider: Optional["ModelProvider"] = None
+    ):
         self._registry = registry or SubagentRegistry()
+        self._provider = provider  # ModelProvider for dependency injection
         self._loaded = False
 
     def _ensure_loaded(self):
@@ -213,9 +221,19 @@ class SubagentTool(Tool):
             return f"[{agent_name}] Error: {error}"
 
     def _get_adapter(self):
-        """Get the current model adapter"""
+        """Get the current model adapter.
+
+        Uses injected provider if available, otherwise falls back to
+        global adapter for backward compatibility.
+        """
+        # First try injected provider (preferred)
+        if self._provider is not None:
+            adapter = self._provider.get_adapter()
+            if adapter is not None:
+                return adapter
+
+        # Fall back to global adapter (backward compatibility)
         try:
-            # Try to get the global adapter
             from src.adapters import get_current_adapter
             return get_current_adapter()
         except ImportError:

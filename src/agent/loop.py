@@ -29,6 +29,18 @@ from src.tools.tracker import ToolCallTracker
 logger = logging.getLogger(__name__)
 
 
+class IdleException(Exception):
+    """Raised when agent enters idle state to break out of agent loop.
+
+    This exception is used to cleanly exit the agent loop when an agent
+    has no more work and wants to enter idle/polling mode. Unlike error
+    exceptions, idle does not mark work items as failed.
+    """
+    def __init__(self, message: str = ""):
+        self.message = message
+        super().__init__(self.message)
+
+
 class LoopEvent(Enum):
     """Events that can occur during agent loop."""
     ITERATION_START = "iteration_start"
@@ -208,6 +220,11 @@ class AgentLoop:
     def current_work_item(self) -> Optional[WorkItem]:
         """Get the current work item being processed."""
         return self._current_work_item
+
+    @property
+    def idle_requested(self) -> bool:
+        """Check if idle was requested during execution."""
+        return getattr(self, '_idle_requested', False)
 
     def can_continue(self) -> bool:
         """Check if we can continue to next iteration (read-only check)."""
@@ -693,13 +710,23 @@ class AgentLoop:
         )
 
         iteration_count = 0
+        self._idle_requested = False
         while self.should_continue:
             iteration_count += 1
             logger.info(f"[AgentLoop.run] ====== 循环迭代 {iteration_count} ======")
             logger.info(f"[AgentLoop.run] should_continue={self.should_continue}")
             logger.info(f"[AgentLoop.run] is_finished={self.context.state.is_finished}")
             logger.info(f"[AgentLoop.run] iteration={self.context.state.iteration}/{self.context.state.max_iterations}")
-            response, tool_calls = await self.execute_with_tools(execute_fn)
+            try:
+                response, tool_calls = await self.execute_with_tools(execute_fn)
+            except IdleException as e:
+                # Agent requested idle state - exit loop gracefully
+                self._idle_requested = True
+                logger.info(f"[AgentLoop.run] IdleException caught: {e.message if e.message else 'enter idle state'}")
+                return ""
+            except Exception as e:
+                logger.error(f"[AgentLoop.run] Unexpected exception in execute_with_tools: {e}")
+                raise
             logger.info(f"[AgentLoop.run] After execute_with_tools: tool_calls={len(tool_calls)}, should_continue={self.should_continue}, last_stop_reason={self._last_stop_reason}")
 
             # If no tool calls, check if we need confirmation
@@ -821,4 +848,5 @@ __all__ = [
     "LoopEvent",
     "LoopMetrics",
     "LoopCallbacks",
+    "IdleException",
 ]

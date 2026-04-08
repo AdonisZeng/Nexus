@@ -12,6 +12,17 @@ logger = logging.getLogger("Nexus")
 class AnthropicAdapter(ModelAdapter):
     """Adapter for Anthropic Claude models"""
 
+    PROVIDER_NAME = "anthropic"
+
+    @classmethod
+    def from_config(cls, config: dict):
+        """Create adapter from config dict."""
+        return cls(
+            api_key=config.get("api_key"),
+            model=config.get("model", "claude-sonnet-4-20250514"),
+            compat=config.get("compat"),
+        )
+
     def __init__(
         self,
         api_key: str = None,

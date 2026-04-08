@@ -21,6 +21,17 @@ class LMStudioAdapter(ModelAdapter):
     LMStudio provides an OpenAI-compatible API at http://localhost:1234/v1
     """
 
+    PROVIDER_NAME = "lmstudio"
+
+    @classmethod
+    def from_config(cls, config: dict):
+        """Create adapter from config dict."""
+        return cls(
+            base_url=config.get("url", "http://localhost:1234/v1"),
+            model=config.get("model"),
+            compat=config.get("compat"),
+        )
+
     def __init__(
         self,
         base_url: str = "http://localhost:1234/v1",
