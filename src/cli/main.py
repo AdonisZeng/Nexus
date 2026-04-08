@@ -142,8 +142,9 @@ def print_event(event: AgentEvent):
 class NexusCLI(ModelProvider):
     """Main CLI class implementing ModelProvider for dependency injection."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, config_path: str = "config.yaml"):
         self.config = config
+        self.config_path = config_path
         self.model_adapter = None
 
     # ModelProvider interface implementation
@@ -367,7 +368,7 @@ class NexusCLI(ModelProvider):
         if mcp_config:
             lines.append("\n<mcp_tools>")
             lines.append("以下是你可通过 MCP (Model Context Protocol) 连接的外部工具：")
-            lines.append(f"\nMCP 配置文件位置: {Path('config.yaml').absolute()}")
+            lines.append(f"\nMCP 配置文件位置: {Path(self.config_path).absolute()}")
             lines.append("如需添加或修改 MCP 服务器，请编辑上述配置文件中的 mcp.servers 部分。")
 
             # 已连接的服务器
@@ -1586,7 +1587,7 @@ class NexusCLI(ModelProvider):
                 return
 
             self.config = update_provider_config(self.config, provider, settings)
-            if save_config(self.config):
+            if save_config(self.config, self.config_path):
                 console.print(f"[green]已更新 {provider} 配置[/green]")
             else:
                 console.print("[red]保存配置失败[/red]")
@@ -1623,7 +1624,7 @@ class NexusCLI(ModelProvider):
             if 0 <= idx < len(providers):
                 selected_provider = providers[idx]
                 self.config = set_default_provider(self.config, selected_provider)
-                if save_config(self.config):
+                if save_config(self.config, self.config_path):
                     console.print(f"[green]已将默认供应商设置为: {selected_provider}[/green]")
                     self._reinit_model_adapter()
                 else:
@@ -1651,22 +1652,34 @@ class NexusCLI(ModelProvider):
 
 async def main():
     """Main entry point"""
+    import sys
+
     parser = argparse.ArgumentParser(description="Nexus - Personal AI Agent")
     parser.add_argument("task", nargs="?", help="Task to execute")
-    parser.add_argument("--config", default="config.yaml", help="Config file path")
+    parser.add_argument("--config", default=None, help="Config file path")
     parser.add_argument("--model", choices=["anthropic", "openai", "ollama", "lmstudio", "custom", "minimax", "xai"], help="Model to use")
 
     args = parser.parse_args()
 
+    # Determine config path: use exe directory if running as frozen exe
+    if args.config:
+        config_path = args.config
+    elif getattr(sys, 'frozen', False):
+        # Running as PyInstaller frozen exe - use exe directory
+        config_path = Path(sys.executable).parent / "config.yaml"
+        config_path = str(config_path)
+    else:
+        config_path = "config.yaml"
+
     # Load config with env var substitution
-    config = load_config(args.config)
+    config = load_config(config_path)
 
     # Override model if specified
     if args.model:
         config.setdefault("models", {})["default"] = args.model
 
     # Create and run CLI
-    cli = NexusCLI(config)
+    cli = NexusCLI(config, args.config)
 
     # Create a task that can be cancelled
     async def run_cli():
