@@ -1,6 +1,6 @@
 """Subagent tool - allows main agent to invoke subagents"""
 import asyncio
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from src.tools.registry import Tool
 from src.tools.subagent.registry import SubagentRegistry

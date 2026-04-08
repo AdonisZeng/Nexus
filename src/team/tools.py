@@ -31,7 +31,6 @@ from rich.box import ROUNDED
 from rich.layout import Layout
 from rich.panel import Panel
 from dataclasses import dataclass, field
-from typing import Optional
 
 logger = get_logger("team.tools")
 
