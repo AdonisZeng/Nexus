@@ -247,7 +247,7 @@ class NexusCLI(ModelProvider):
 
         # Print initialization info with Rich
         print_init_info(
-            provider=default_model,
+            provider=model_config.get("default", "anthropic"),
             model=self.model_adapter.get_name(),
             memory_dir=str(self.memory_manager.memory_dir),
             cwd=str(Path.cwd())
