@@ -2,7 +2,7 @@
 import asyncio
 from typing import TYPE_CHECKING, Any, Optional
 
-from src.tools.registry import Tool
+from src.tools.registry import ModelProviderMixin, Tool
 from src.tools.subagent.registry import SubagentRegistry
 from src.tools.subagent.runner import SubagentRunner
 from src.tools.subagent.models import SubagentResult
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 logger = get_logger("subagent.tool")
 
 
-class SubagentTool(Tool):
+class SubagentTool(ModelProviderMixin, Tool):
     """Tool for invoking subagents - registered as 'subagent' in ToolRegistry"""
 
     is_mutating = False
@@ -210,24 +210,10 @@ class SubagentTool(Tool):
             return f"[{agent_name}] Error: {error}"
 
     def _get_adapter(self):
-        """Get the current model adapter.
-
-        Uses injected provider if available, otherwise falls back to
-        global adapter for backward compatibility.
-        """
-        # First try injected provider (preferred)
+        """Get the current model adapter via injected provider."""
         if self._provider is not None:
-            adapter = self._provider.get_adapter()
-            if adapter is not None:
-                return adapter
-
-        # Fall back to global adapter (backward compatibility)
-        try:
-            from src.adapters import get_current_adapter
-            return get_current_adapter()
-        except ImportError:
-            logger.error("Could not import get_current_adapter")
-            return None
+            return self._provider.get_adapter()
+        return None
 
     def _get_tool_registry(self):
         """Get the global tool registry"""

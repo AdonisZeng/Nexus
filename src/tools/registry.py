@@ -1,6 +1,6 @@
 """Tool registry and base tool"""
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Callable, Optional, Type
+from typing import Any, AsyncIterator, Callable, Optional, Type, TYPE_CHECKING
 import asyncio
 import subprocess
 from pathlib import Path
@@ -8,6 +8,21 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from .schema_cleaner import SchemaCleaner
+
+if TYPE_CHECKING:
+    from src.adapters.provider import ModelProvider
+
+
+class ModelProviderMixin:
+    """Mixin for tools that need access to the model adapter via injection."""
+
+    _provider: Optional["ModelProvider"] = None
+
+    def _get_adapter(self):
+        """Get model adapter from injected provider, or None if not available."""
+        if self._provider is not None:
+            return self._provider.get_adapter()
+        return None
 
 
 class Tool(ABC):

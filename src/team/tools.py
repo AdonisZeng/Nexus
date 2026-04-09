@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
-from src.tools.registry import Tool
+from src.tools.registry import ModelProviderMixin, Tool
 
 if TYPE_CHECKING:
     from src.adapters.provider import ModelProvider
@@ -67,7 +67,7 @@ class TeamPanelState:
     last_throttle_time: float = 0.0
 
 
-class TeamTool(Tool):
+class TeamTool(ModelProviderMixin, Tool):
     """Tool for creating and managing Agent Teams
 
     This tool allows the main agent (Lead) to:
@@ -99,13 +99,7 @@ class TeamTool(Tool):
         self._team_name_for_live: Optional[str] = None
         self._THROTTLE_INTERVAL: float = 1.0  # Minimum seconds between renders
         self._TASK_BOARD_CACHE_TTL: float = 5.0  # Task board cache TTL
-        self._provider = provider  # ModelProvider for explicit adapter injection
-
-    def _get_adapter(self):
-        """Get model adapter from injected provider, or None if not available."""
-        if self._provider is not None:
-            return self._provider.get_adapter()
-        return None
+        self._provider = provider
 
     @property
     def name(self) -> str:

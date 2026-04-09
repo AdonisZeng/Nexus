@@ -90,6 +90,11 @@ class AgentSession(ModelProvider):
         team_tool = TeamTool(provider=self)
         self.tool_registry.register(team_tool)
 
+        # Inject provider into already-registered SubagentTool
+        subagent_tool = self.tool_registry.get("subagent")
+        if subagent_tool:
+            subagent_tool._provider = self
+
         self.mcp_client = MCPClient()
         self.tool_orchestrator = None  # set by caller after construction
 
