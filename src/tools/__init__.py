@@ -4,6 +4,7 @@ from .file import FileReadTool, FileWriteTool, FileSearchTool
 from .shell import ShellTool
 from .code import CodeExecTool
 from .subagent import SubagentTool, SubagentRegistry
+from src.team.tools import TeamTool
 
 __all__ = [
     "Tool",
@@ -19,5 +20,5 @@ __all__ = [
     "TeamTool",
 ]
 
-# Global tool registry instance for subagent access
-global_registry = ToolRegistry()
+# Re-export the single authoritative instance from registry (avoid double-instantiation)
+from .registry import global_registry

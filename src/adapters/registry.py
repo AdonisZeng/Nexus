@@ -98,3 +98,4 @@ class AdapterRegistry:
         from . import lmstudio
         from . import custom
         from . import xai
+        from . import minimax

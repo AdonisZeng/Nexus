@@ -3,15 +3,12 @@ import asyncio
 import argparse
 import os
 import logging
-import hashlib
 from pathlib import Path
 from typing import AsyncIterator, Optional
-from dataclasses import dataclass, field
-from collections import deque
 
 from src.agent import AgentEvent, EventType, ToolDefinition, ToolResult
 from src.config import load_config, save_config, update_provider_config, set_default_provider, get_configured_providers
-from src.adapters import create_adapter, set_current_adapter, ModelProvider, AdapterRegistry
+from src.adapters import ModelProvider, AdapterRegistry
 from src.tools import ToolRegistry
 from src.skills import SkillRegistry
 from src.mcp import MCPClient, MCPServerConfig
@@ -39,83 +36,10 @@ from src.cli.rich_ui import (
     print_api_protocol_select,
     print_plan_mode_indicator,
     print_tasks_mode_indicator,
-    start_streaming,
-    print_streaming_text,
-    print_streaming_line,
-    clear_streaming_buffer,
 )
-from src.adapters.base import StreamEventType
 
 logger = logging.getLogger("Nexus")
 import uuid
-
-
-@dataclass
-class LoopDetector:
-    """检测 Agent 执行循环
-
-    通过跟踪最近的工具调用和输出来检测是否陷入重复模式
-    """
-    max_history: int = 10  # 跟踪的历史条目数
-    similar_threshold: int = 5  # 连续相似条目数达到这个值认为循环
-    output_similarity: float = 0.8  # 输出相似度阈值
-
-    # 跟踪历史
-    _tool_call_history: deque = field(default_factory=deque)
-    _output_history: deque = field(default_factory=deque)
-
-    def _hash_args(self, args: dict) -> str:
-        """对工具参数进行哈希，用于比较是否相同"""
-        if not args:
-            return ""
-        # 简化：只取前3个键值对 + 整体大小
-        items = list(args.items())[:3]
-        short = {k: str(v)[:50] for k, v in items}
-        return str(sorted(short.items()))
-
-    def _hash_output(self, output: str) -> str:
-        """对输出进行哈希"""
-        if not output:
-            return ""
-        # 取输出的前100字符的哈希
-        return hashlib.md5(output[:200].encode()).hexdigest()[:8]
-
-    def record_tool_call(self, tool_name: str, args: dict):
-        """记录一个工具调用"""
-        entry = (tool_name, self._hash_args(args))
-        self._tool_call_history.append(entry)
-        if len(self._tool_call_history) > self.max_history:
-            self._tool_call_history.popleft()
-
-    def record_output(self, output: str):
-        """记录一个输出"""
-        if output and len(output) > 20:  # 太短的输出不计入
-            entry = self._hash_output(output)
-            self._output_history.append(entry)
-            if len(self._output_history) > self.max_history:
-                self._output_history.popleft()
-
-    def detect_loop(self) -> tuple[bool, str]:
-        """
-        检测是否陷入循环
-
-        Returns:
-            (is_looping, reason)
-        """
-        # 检查是否有连续的相同工具调用
-        if len(self._tool_call_history) >= self.similar_threshold:
-            recent = list(self._tool_call_history)[-self.similar_threshold:]
-            if len(set(recent)) == 1:
-                tool_name = recent[0][0]
-                return True, f"检测到重复工具调用: 连续 {self.similar_threshold} 次调用相同的 '{tool_name}'"
-
-        # 检查是否有连续的相似输出
-        if len(self._output_history) >= self.similar_threshold:
-            recent = list(self._output_history)[-self.similar_threshold:]
-            if len(set(recent)) == 1:
-                return True, f"检测到重复输出: 连续 {self.similar_threshold} 次产生相同的输出"
-
-        return False, ""
 
 
 def print_event(event: AgentEvent):
@@ -140,65 +64,136 @@ def print_event(event: AgentEvent):
 
 
 class NexusCLI(ModelProvider):
-    """Main CLI class implementing ModelProvider for dependency injection."""
+    """Main CLI class implementing ModelProvider for dependency injection.
+
+    Delegates all execution logic to AgentSession, keeping only UI/session
+    concerns here: input loop, slash commands, session persistence, settings.
+    """
 
     def __init__(self, config: dict, config_path: str = "config.yaml"):
         self.config = config
         self.config_path = config_path
-        self.model_adapter = None
+        self._session = None  # AgentSession — set by set_adapter()
 
-    # ModelProvider interface implementation
+    # ModelProvider interface — delegates to session
+
     def get_adapter(self):
-        """Get the current model adapter."""
-        return self.model_adapter
+        return self._session.model_adapter if self._session else None
 
     def set_adapter(self, adapter):
-        """Set the current model adapter."""
-        self.model_adapter = adapter
-        # Also set global for backward compatibility (Teammate, etc.)
-        set_current_adapter(adapter)
-        self.tool_registry = ToolRegistry()
-        # Inject self as ModelProvider into SubagentTool
-        subagent_tool = self.tool_registry.get('subagent')
+        """(Re)create AgentSession with the given adapter.
+
+        Called during initialize() and on model switch.
+        """
+        from src.agent.session import AgentSession
+
+        prev_cwd = self._session.cwd if self._session else None
+        self._session = AgentSession(adapter, cwd=prev_cwd)
+
+        # Give the session its own tool orchestrator so it can execute tools
+        from src.tools.context import ToolGate
+        from src.tools.orchestrator import ToolOrchestrator
+        self._session.tool_orchestrator = ToolOrchestrator(ToolGate())
+
+        # Inject self as ModelProvider into SubagentTool so subagents can
+        # resolve the adapter through the same provider chain as NexusCLI.
+        subagent_tool = self._session.tool_registry.get('subagent')
         if subagent_tool:
-            subagent_tool._provider = self
+            subagent_tool._provider = self._session
+
+        # UI / session state
         self.skill_registry = SkillRegistry()
-        self.mcp_client = MCPClient()
-        # Register TeamTool to this instance's registry
-        from src.team.tools import TeamTool
-        self.tool_registry.register(TeamTool())
-        self.messages = []
-        self.system_prompt = None
-        # Memory management
         self.memory_manager = MemoryManager()
         self.auto_memory_manager = AutoMemoryManager()
         self.session_id = str(uuid.uuid4())
         self.current_title = "新对话"
-        # Input session for command completion
+
+        # Input / completion
         self._input_session = None
         self._completion_commands = None
+
         # Skills directory monitoring
         self._skills_last_check = 0
         from src.skills import get_user_skills_dir
         self._user_skills_dir = get_user_skills_dir()
-        # Plan mode
-        self.plan_mode = False
+
+        # Mode managers depend on AgentSession, not NexusCLI — keeps execution logic out of CLI layer
         from src.cli.plan_mode import PlanModeManager
-        self.plan_manager = PlanModeManager(self)
-        # Tasks mode
-        self.tasks_mode = False
+        self.plan_manager = PlanModeManager(self._session)
         from src.tasks.tasks_mode import TasksModeManager
-        self.tasks_manager = TasksModeManager(self)
-        # Tool orchestrator
-        self.tool_orchestrator = None
-        # MCP tool approval system
-        from src.mcp.approval import MCPToolApproval
-        self.tool_approval = MCPToolApproval()
-        # Background task manager
-        from src.tools.background import get_background_manager
-        self.bg_manager = get_background_manager()
-        # Nag Reminder mechanism - 跟踪自上次 todo 工具调用以来的轮次
-        self.rounds_since_todo = 0
+        self.tasks_manager = TasksModeManager(self._session)
+
+    # Properties delegating to AgentSession
+
+    @property
+    def model_adapter(self):
+        return self._session.model_adapter if self._session else None
+
+    @model_adapter.setter
+    def model_adapter(self, value):
+        if self._session:
+            self._session.model_adapter = value
+
+    @property
+    def messages(self):
+        return self._session.messages if self._session else []
+
+    @messages.setter
+    def messages(self, value):
+        if self._session:
+            self._session.messages = value
+
+    @property
+    def system_prompt(self):
+        return self._session.system_prompt if self._session else None
+
+    @system_prompt.setter
+    def system_prompt(self, value):
+        if self._session:
+            self._session.system_prompt = value
+
+    @property
+    def plan_mode(self):
+        return self._session.plan_mode if self._session else False
+
+    @plan_mode.setter
+    def plan_mode(self, value):
+        if self._session:
+            self._session.plan_mode = value
+
+    @property
+    def tasks_mode(self):
+        return self._session.tasks_mode if self._session else False
+
+    @tasks_mode.setter
+    def tasks_mode(self, value):
+        if self._session:
+            self._session.tasks_mode = value
+
+    @property
+    def tool_registry(self):
+        return self._session.tool_registry if self._session else None
+
+    @property
+    def mcp_client(self):
+        return self._session.mcp_client if self._session else None
+
+    @property
+    def tool_orchestrator(self):
+        return self._session.tool_orchestrator if self._session else None
+
+    @tool_orchestrator.setter
+    def tool_orchestrator(self, value):
+        if self._session:
+            self._session.tool_orchestrator = value
+
+    @property
+    def tool_approval(self):
+        return self._session.tool_approval if self._session else None
+
+    @property
+    def bg_manager(self):
+        return self._session.bg_manager if self._session else None
 
     def _create_model_adapter(self, model_config: dict) -> "ModelAdapter":
         """Create model adapter based on config.
@@ -210,44 +205,24 @@ class NexusCLI(ModelProvider):
             Model adapter instance
         """
         default_model = model_config.get("default", "anthropic")
-
-        if default_model in ("minimax",):
-            # minimax is a preset of custom with specific settings
-            import os
-            from src.adapters.custom import CustomAdapter
-            minimax_config = model_config.get("minimax", {})
-            return CustomAdapter(
-                base_url=minimax_config.get("base_url", "https://api.minimaxi.com/anthropic"),
-                api_key=minimax_config.get("api_key") or os.environ.get("MINIMAX_API_KEY"),
-                model=minimax_config.get("model", "MiniMax-M2.7"),
-                compat=minimax_config.get("compat"),
-                api_protocol="anthropic"
-            )
-
-        # All other providers use registry
         return AdapterRegistry.create(default_model, model_config)
 
     async def initialize(self):
         """Initialize the CLI"""
-        self.cwd = str(Path.cwd())
-        # Create model adapter
+        from src.utils.output import RichOutputSink, set_output_sink
+        set_output_sink(RichOutputSink())
         model_config = self.config.get("models", {})
-        self.model_adapter = self._create_model_adapter(model_config)
+        adapter = self._create_model_adapter(model_config)
+        self.set_adapter(adapter)  # creates self._session with tool orchestrator
+        self._session.cwd = str(Path.cwd())
 
-        # Set current adapter for subagent access
-        self.set_adapter(self.model_adapter)
-
-        # Connect MCP servers (non-blocking, background)
         self._mcp_connection_task = asyncio.create_task(self._connect_mcp_servers())
 
-        # 加载 MCP 审批配置
         mcp_config = self.config.get("mcp", {})
         self.tool_approval.load_from_config(mcp_config)
 
-        # 加载所有 skills 元数据并生成 system_prompt
         self._load_skills_prompt()
 
-        # Print initialization info with Rich
         print_init_info(
             provider=model_config.get("default", "anthropic"),
             model=self.model_adapter.get_name(),
@@ -258,96 +233,17 @@ class NexusCLI(ModelProvider):
         # Initialize completion commands
         self._update_completion_commands()
 
-        # Initialize tool orchestrator
-        from src.tools.context import ToolGate
-        from src.tools.orchestrator import ToolOrchestrator
-        self.tool_orchestrator = ToolOrchestrator(ToolGate())
-
-    def _compress_context(self, keep_recent: int = 10) -> int:
-        """Compress conversation history by keeping recent messages.
-
-        Args:
-            keep_recent: Number of recent messages to keep
-
-        Returns:
-            Number of messages removed
-        """
-        if len(self.messages) <= keep_recent:
+    async def _process_auto_memory(self) -> int:
+        """Process auto memory after session end. Returns count of memories saved."""
+        if len(self.messages) <= 4:
             return 0
-
-        # 保留 system message + 最近的消息（和子 Agent 保持一致）
-        system_msgs = [m for m in self.messages if m.get("role") == "system"]
-        recent_msgs = [m for m in self.messages if m.get("role") != "system"][-keep_recent:]
-
-        removed = len(self.messages) - len(system_msgs) - len(recent_msgs)
-        self.messages = system_msgs + recent_msgs
-        logger.info(f"[compress_context] 压缩上下文：删除了 {removed} 条早期消息，保留 system({len(system_msgs)}) + recent({len(recent_msgs)})")
-        return removed
-
-    async def _compress_context_llm(self) -> bool:
-        """使用 LLM 智能压缩上下文。
-
-        将所有非 system 消息交给 LLM 提炼精简信息，
-        然后用总结替代所有非 system 消息。
-
-        Returns:
-            True if compression succeeded
-        """
-        if not self.messages:
-            return False
-
-        # 分离 system 和非 system 消息
-        system_msgs = [m for m in self.messages if m.get("role") == "system"]
-        non_system_msgs = [m for m in self.messages if m.get("role") != "system"]
-
-        if len(non_system_msgs) <= 2:
-            return False
-
-        # 格式化消息给 LLM
-        conversation = "\n".join([
-            f"{m.get('role', 'user')}: {m.get('content', '')[:500]}"
-            for m in non_system_msgs
-        ])
-
-        summarize_prompt = f"""你是一个上下文压缩助手。请提炼以下对话的精简摘要，
-保留关键信息、决策、进展和重要细节。摘要应该简洁但信息完整。
-
-对话内容：
-{conversation}
-
-请直接返回摘要内容，不需要额外解释。摘要格式：
-[对话摘要]
-- 关键主题：xxx
-- 重要进展：xxx
-- 待处理事项：xxx
-- 关键细节：xxx
-"""
-
         try:
-            # 调用 LLM 生成摘要
-            response = await self.model_adapter.chat(
-                [{"role": "user", "content": summarize_prompt}],
-                ""
+            return await self.auto_memory_manager.process_session(
+                self.messages, self.session_id, self.model_adapter
             )
-
-            if not response:
-                logger.warning("[compress_context_llm] LLM 摘要返回为空，回退到简单压缩")
-                self._compress_context()
-                return False
-
-            # 用摘要替换非 system 消息
-            summary_msg = {"role": "system", "content": f"[对话摘要]\n{response}"}
-            self.messages = system_msgs + [summary_msg]
-
-            original_tokens = sum(len(m.get("content", "")) for m in non_system_msgs) // 4
-            summary_tokens = len(response) // 4
-            logger.info(f"[compress_context_llm] 压缩完成：原始约 {original_tokens} tokens → 摘要 {summary_tokens} tokens")
-            return True
-
         except Exception as e:
-            logger.error(f"[compress_context_llm] 压缩失败: {e}，回退到简单压缩")
-            self._compress_context()
-            return False
+            logger.warning(f"Auto Memory: failed: {e}")
+            return 0
 
     def _load_tools_prompt(self) -> str:
         """生成可用工具的提示词，区分内置工具和 MCP 工具"""
@@ -435,14 +331,14 @@ class NexusCLI(ModelProvider):
         # 添加工作区信息到 system prompt
         workspace_info = f"""
 ## 当前工作区
-当前工作目录 (workspace): {self.cwd}
+当前工作目录 (workspace): {self._session.cwd}
 所有文件操作默认在此目录下进行，除非明确指定其他路径。"""
 
         # 添加命令列表到 system prompt
         commands_info = self._build_commands_prompt()
 
         # 加载 NEXUS.md 内容（项目知识）
-        nexus_content = NexusMDLoader.load_and_merge(Path(self.cwd))
+        nexus_content = NexusMDLoader.load_and_merge(Path(self._session.cwd))
         nexus_section = ""
         if nexus_content:
             nexus_section = f"""
@@ -582,8 +478,12 @@ class NexusCLI(ModelProvider):
         return "\n".join(lines)
 
     async def execute_task(self, task: str) -> AsyncIterator[AgentEvent]:
-        """Execute a task and yield events"""
-        # Check for slash command first
+        """Execute a task and yield events.
+
+        Skill commands are handled here (CLI layer); all other execution
+        is delegated to AgentSession.
+        """
+        # Check for skill command first (CLI-layer concern)
         parsed = self.skill_registry.parse_input(task)
         if parsed:
             skill_name, args, _ = parsed
@@ -594,278 +494,13 @@ class NexusCLI(ModelProvider):
                     yield event
                 return
 
-        # Regular task - use agent with tools
-        system_prompt = self.system_prompt
-
-        # Add user message first, then check compression with NEW total
-        self.messages.append({"role": "user", "content": task})
-
-        # Then check compression after adding user message
-        if len(self.messages) > 2:
-            from src.agent.context import AgentContext
-            temp_context = AgentContext()
-            total_tokens = temp_context.calculate_total_tokens(self.messages)
-            if temp_context.should_compress(total_tokens):
-                logger.warning(f"[execute_task] 上下文超过70%阈值 ({total_tokens} tokens)，开始压缩")
-                yield AgentEvent(EventType.OUTPUT, f"[上下文压缩] 当前使用 {total_tokens} tokens，开始压缩...")
-                await self._compress_context_llm()
-                yield AgentEvent(EventType.OUTPUT, "[上下文压缩] 完成")
-
-        # Update title if this is the first user message
+        # Update title from first user message (session metadata, stays in CLI)
         if self.current_title == "新对话" and task:
             self.current_title = task[:50] + ("..." if len(task) > 50 else "")
 
-        # Get tool schemas
-        tools_schema = self.tool_registry.get_tools_schema()
-
-        # Add MCP tools if available
-        for server in self.mcp_client.list_servers():
-            tools_schema.extend(self.mcp_client.get_tools_schema(server))
-
-        if not tools_schema:
-            # Simple chat without tools
-            response = await self.model_adapter.chat(self.messages, system_prompt)
-            yield AgentEvent(EventType.OUTPUT, response)
-            self.messages.append({"role": "assistant", "content": response})
-            return
-
-        # Check for completed background tasks before LLM call
-        # Drain to clear old notifications so they won't be processed again
-        notifications = self.bg_manager.drain_notifications()
-        if notifications:
-            notif_text = "\n".join(
-                f"[bg:{n['task_id']}] {n['status']}: {n['result']}"
-                for n in notifications
-            )
-            self.messages.append({
-                "role": "user",
-                "content": f"<background-results>\n{notif_text}\n</background-results>"
-            })
-            self.messages.append({
-                "role": "assistant",
-                "content": "我注意到以下后台任务已完成：\n" + notif_text
-            })
-
-        # Chat with tools
-        yield AgentEvent(EventType.THINKING, "分析任务中...")
-
-        try:
-            # Check if streaming is supported and enabled
-            use_streaming = (
-                hasattr(self.model_adapter, 'chat_stream') and
-                self.model_adapter.supports_streaming()
-            )
-
-            if use_streaming:
-                # Use streaming for first call
-                result = await self._execute_task_streaming(
-                    tools_schema, system_prompt
-                )
-                response = result.text
-                tool_calls = result.tool_calls
-                last_stop_reason = result.stop_reason
-            else:
-                # Fall back to non-streaming
-                result = await self.model_adapter.chat_with_tools_and_stop_reason(
-                    self.messages,
-                    tools_schema,
-                    system_prompt
-                )
-                response = result.text
-                tool_calls = result.tool_calls
-                last_stop_reason = result.stop_reason
-            if tool_calls:
-                logger.debug(f"[execute_task] 工具调用: {[tc['name'] for tc in tool_calls]}")
-
-            # Process tool calls with loop detection
-            loop_detector = LoopDetector()
-            max_tool_calls = 100  # 硬性限制，防止无限循环
-            tool_call_count = 0
-
-            while tool_calls:
-                tool_call_count += 1
-
-                # 检查是否超过最大工具调用数
-                if tool_call_count > max_tool_calls:
-                    logger.warning(f"[execute_task] 达到最大工具调用数 ({max_tool_calls})，强制停止")
-                    yield AgentEvent(EventType.OUTPUT, f"达到最大工具调用数，任务中断")
-                    yield AgentEvent(EventType.DONE, "任务中断")
-                    return
-
-                # 检查循环
-                for tc in tool_calls:
-                    loop_detector.record_tool_call(tc.get("name", "unknown"), tc.get("arguments", {}))
-
-                is_looping, loop_reason = loop_detector.detect_loop()
-                if is_looping:
-                    logger.warning(f"[execute_task] 检测到循环: {loop_reason}")
-                    # 只记录日志，不在 UI 上显示
-                    yield AgentEvent(EventType.OUTPUT, f"检测到执行循环，任务中断")
-                    yield AgentEvent(EventType.DONE, "任务中断")
-                    return
-
-                # Build assistant message with tool calls for message history
-                assistant_message = {
-                    "role": "assistant",
-                    "content": response or "",
-                    "tool_calls": tool_calls
-                }
-                self.messages.append(assistant_message)
-
-                # Execute tools with parallel execution where possible
-                tool_results = await self._execute_tools_parallel(tool_calls, tool_call_count)
-
-                # Process results and add to messages
-                for tool_call, result in tool_results:
-                    tool_name = tool_call["name"]
-
-                    # Nag Reminder tracking - 跟踪非 todo 工具调用次数
-                    if tool_name == "todo":
-                        self.rounds_since_todo = 0
-                    else:
-                        self.rounds_since_todo += 1
-
-                    # Emit tool call event
-                    yield AgentEvent(
-                        EventType.TOOL_CALL,
-                        f"调用工具: {tool_name}",
-                        metadata={"tool_name": tool_name, "args": tool_call.get("arguments", {})}
-                    )
-
-                    # Check if result contains error (support both dict and string formats)
-                    error_msg = None
-                    if isinstance(result, dict) and "error" in result:
-                        error_msg = result["error"]
-                    elif isinstance(result, str) and result.startswith("Error:"):
-                        error_msg = result
-
-                    if error_msg:
-                        logger.warning(f"[execute_task] 工具 {tool_name} 执行出错: {error_msg}")
-                        yield AgentEvent(
-                            EventType.TOOL_RESULT,
-                            f"Error: {error_msg}",
-                            metadata={"tool_name": tool_name}
-                        )
-                    else:
-                        yield AgentEvent(
-                            EventType.TOOL_RESULT,
-                            str(result),
-                            metadata={"tool_name": tool_name}
-                        )
-
-                    # Add tool result to messages with tool_call_id for proper association
-                    self.messages.append({
-                        "role": "tool",
-                        "content": str(result),
-                        "tool_call_id": tool_call.get("id")
-                    })
-
-                # Nag Reminder injection - 当非 todo 工具调用达到阈值时注入提醒
-                # 但如果处于 plan/tasks mode，跳过 reminder（这些模式自己管理任务列表）
-                if self.plan_mode or self.tasks_mode:
-                    # Plan/Tasks 模式不需要 Nag Reminder，重置计数器避免误导
-                    self.rounds_since_todo = 0
-                elif self.rounds_since_todo >= 3:
-                    # 检查最近一条 system 消息是否已经是 reminder，避免重复污染
-                    last_reminder_msg = None
-                    for msg in reversed(self.messages):
-                        if msg.get("role") == "system" and "<reminder>" in msg.get("content", ""):
-                            last_reminder_msg = msg.get("content", "")
-                            break
-                    if not last_reminder_msg:
-                        self.messages.append({
-                            "role": "system",
-                            "content": "<reminder>请更新任务列表</reminder>"
-                        })
-                    self.rounds_since_todo = 0  # 重置计数器
-
-                # Get next response
-                # Check for completed background tasks before next LLM call
-                notifications = self.bg_manager.drain_notifications()
-                if notifications:
-                    notif_text = "\n".join(
-                        f"[bg:{n['task_id']}] {n['status']}: {n['result']}"
-                        for n in notifications
-                    )
-                    self.messages.append({
-                        "role": "user",
-                        "content": f"<background-results>\n{notif_text}\n</background-results>"
-                    })
-                    self.messages.append({
-                        "role": "assistant",
-                        "content": "我注意到以下后台任务已完成：\n" + notif_text
-                    })
-
-                try:
-                    result = await self.model_adapter.chat_with_tools_and_stop_reason(
-                        self.messages,
-                        tools_schema,
-                        system_prompt
-                    )
-                    response = result.text
-                    tool_calls = result.tool_calls
-                    last_stop_reason = result.stop_reason
-                    # 记录输出用于循环检测
-                    if response:
-                        loop_detector.record_output(response)
-                except asyncio.CancelledError:
-                    logger.warning("[execute_task] 任务执行被取消")
-                    yield AgentEvent(EventType.DONE, "任务中断")
-                    raise
-
-            # Final response
-            if response:
-                # 流式响应已经在 _execute_task_streaming 中实时输出了
-                # 这里只需要记录到消息历史，不需要再次输出
-                if not use_streaming:
-                    yield AgentEvent(EventType.OUTPUT, response)
-                self.messages.append({"role": "assistant", "content": response})
-
-            yield AgentEvent(EventType.DONE, "任务完成")
-
-            # 清理 Nag Reminder 消息
-            self.messages = [
-                m for m in self.messages
-                if not (m.get("role") == "system" and "<reminder>" in m.get("content", ""))
-            ]
-
-        except asyncio.CancelledError:
-            logger.warning("[execute_task] 任务执行被取消")
-            raise
-        except Exception as e:
-            logger.error(f"[execute_task] 执行出错: {str(e)}")
-            yield AgentEvent(EventType.ERROR, str(e))
-
-    async def _confirm_task_completion(self, last_response: str) -> bool:
-        """发送确认请求给模型，判断任务是否真正完成。
-
-        @param last_response 模型最后的回复内容
-        @return True 如果模型确认完成，False 如果模型说未完成
-        """
-        confirm_msg = {
-            "role": "user",
-            "content": "请用一句话确认：你是否已完成了用户交给你的任务？"
-                       "如果完成了，回答「任务完成」；如果没完成或不确定，回答「任务未完成」。"
-        }
-        # 使用 messages 的副本避免污染原始对话历史
-        confirm_messages = self.messages + [confirm_msg]
-        try:
-            response = await self.model_adapter.chat(confirm_messages, None)
-            logger.info(f"[execute_task] 任务完成确认响应: {response[:200]}")
-
-            # 使用更精确的匹配（去除 ** 标记）
-            response_clean = response.strip().replace("**", "").replace("*", "")
-            if response_clean == "任务完成":
-                return True
-            elif response_clean == "任务未完成":
-                return False
-            else:
-                # 模糊情况，记录日志并假设未完成
-                logger.warning(f"[execute_task] 确认响应不明确: {response[:100]}")
-                return False
-        except Exception as e:
-            logger.error(f"[execute_task] 任务完成确认失败: {e}")
-            return False  # 确认失败时假设未完成，避免假阳性
+        # Delegate all execution to AgentSession
+        async for event in self._session.execute_task(task):
+            yield event
 
     def _update_completion_commands(self) -> None:
         """Update command completion list"""
@@ -886,16 +521,6 @@ class NexusCLI(ModelProvider):
         self._completion_commands = builtin_commands + skill_commands
 
         self._input_session = create_input_session(self._completion_commands)
-
-    def _get_input(self, prompt_str: str) -> str:
-        """Get input with command completion"""
-        if self._input_session:
-            try:
-                return comp_get_input(prompt_str, self._input_session)
-            except Exception:
-                # Fallback to basic input
-                return input(prompt_str)
-        return input(prompt_str)
 
     async def _get_input_async(self, prompt_str: str) -> str:
         """Get input with command completion (async)"""
@@ -935,183 +560,6 @@ class NexusCLI(ModelProvider):
             except Exception as e:
                 logger.warning(f"MCP: 后台连接服务器 {server_config.get('name', 'unknown')} 失败: {e}")
 
-    async def _execute_tool_call(
-        self,
-        tool_call: dict,
-        iteration: int
-    ) -> tuple[dict, str]:
-        """Execute a single tool call and return the result.
-
-        Args:
-            tool_call: Tool call dict with name, arguments, id
-            iteration: Current iteration number for logging
-
-        Returns:
-            Tuple of (tool_call, result)
-        """
-        tool_name = tool_call["name"]
-        args = tool_call["arguments"]
-
-        result = None
-
-        try:
-            # Check for parse errors from adapter
-            if "__parse_error__" in args:
-                raise ValueError(f"工具 {tool_name} 的参数格式错误: {args['__parse_error__']}")
-
-            # Get tool definition for orchestrator
-            tool = None
-
-            # Check if it's an MCP tool (mcp__{server}__{tool} format)
-            from src.mcp.client import parse_qualified_tool_name
-            from src.mcp.approval import ApprovalDecision
-            try:
-                server, actual_name = parse_qualified_tool_name(tool_name)
-                if self.mcp_client.is_connected(server):
-                    # Check approval before executing
-                    decision = await self.tool_approval.check(server, actual_name, args)
-                    if decision == ApprovalDecision.DENY:
-                        result = "Tool call denied by approval policy"
-                    elif decision == ApprovalDecision.PROMPT:
-                        result = "Tool call requires user approval (not yet implemented)"
-                    else:
-                        # APPROVE - execute the tool
-                        result = await self.mcp_client.call_tool(server, actual_name, args)
-            except ValueError:
-                # Not an MCP tool, check built-in tools
-                tool = self.tool_registry.get(tool_name)
-
-            # Use orchestrator for built-in tools
-            if result is None and tool:
-                # Built-in tool execution
-                from src.tools.context import ToolContext
-
-                context = ToolContext(
-                    tool_name=tool_name,
-                    args=args,
-                    cwd=Path(self.cwd),
-                    tracker=None,
-                    gate=self.tool_orchestrator.gate if hasattr(tool, 'is_mutating') and tool.is_mutating else None
-                )
-
-                result = await self.tool_orchestrator.execute(tool, args, context)
-            elif result is None:
-                # Fallback to registry execute for non-MCP tools
-                result = await self.tool_registry.execute(tool_name, **args)
-
-        except asyncio.CancelledError:
-            raise  # 重新抛出取消异常，不包装
-        except Exception as e:
-            result = {"error": str(e)}  # 统一返回字典格式
-
-        return tool_call, result
-
-    async def _execute_tools_parallel(
-        self,
-        tool_calls: list[dict],
-        iteration: int
-    ) -> list[tuple[dict, str]]:
-        """Execute multiple tool calls with parallel execution where possible.
-
-        Uses DependencyAnalyzer to determine which tools can run in parallel.
-        """
-        from src.tools.dependency_analyzer import DependencyAnalyzer
-
-        # Generate unique ids for tool_calls that don't have one
-        for idx, tc in enumerate(tool_calls):
-            if not tc.get("id"):
-                tc["id"] = f"auto_{idx}_{tc.get('name', 'unknown')}"
-
-        analyzer = DependencyAnalyzer()
-        batches = analyzer.analyze(tool_calls)
-
-        results = []
-
-        # Execute each batch
-        for batch_idx, batch in enumerate(batches):
-            if len(batch) == 1:
-                # Single tool - execute directly
-                tool_call, result = await self._execute_tool_call(batch[0], iteration)
-                results.append((tool_call, result))
-            else:
-                # Multiple tools - execute in parallel
-                tasks = [
-                    self._execute_tool_call(tc, iteration)
-                    for tc in batch
-                ]
-                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                # Filter out exceptions and log them
-                for i, result in enumerate(batch_results):
-                    if isinstance(result, Exception):
-                        logger.error(f"并行工具执行异常: {result}")
-                        batch_results[i] = (batch[i], {"error": str(result)})
-                results.extend(batch_results)
-
-        # Sort results to maintain original order
-        original_order = {tc["id"]: idx for idx, tc in enumerate(tool_calls)}
-        results.sort(key=lambda x: original_order.get(x[0].get("id"), 0))
-
-        return results
-
-    async def _execute_task_streaming(
-        self,
-        tools_schema: list,
-        system_prompt: str
-    ) -> "ChatResult":
-        """Execute task with streaming response.
-
-        This method handles the streaming response from the model,
-        displaying text in real-time while collecting tool calls.
-
-        Returns ChatResult with text, tool_calls, and stop_reason.
-        """
-        from src.adapters.base import StreamEventType, ChatResult
-
-        logger.info(f"[execute_task_streaming] 开始流式调用，工具数量: {len(tools_schema)}")
-
-        response_parts = []
-        tool_calls = []
-        stop_reason = None
-
-        # Start streaming
-        start_streaming()
-
-        try:
-            async for event in self.model_adapter.chat_stream(
-                self.messages,
-                tools_schema,
-                system_prompt
-            ):
-                if event.type == StreamEventType.TEXT_DELTA:
-                    # Real-time text output
-                    if event.content:
-                        response_parts.append(event.content)
-                        print_streaming_text(event.content)
-
-                elif event.type == StreamEventType.TOOL_USE_COMPLETE:
-                    # Tool calls from the response
-                    if event.tool_calls:
-                        tool_calls = event.tool_calls
-                        logger.info(f"[execute_task_streaming] 收到工具调用: {[tc['name'] for tc in tool_calls]}")
-
-                elif event.type == StreamEventType.MESSAGE_STOP:
-                    # End of message - extract stop_reason
-                    stop_reason = event.stop_reason
-                    logger.info(f"[execute_task_streaming] 流式响应完成, stop_reason={stop_reason}")
-
-        except Exception as e:
-            logger.error(f"[execute_task_streaming] 流式调用出错: {e}")
-            clear_streaming_buffer()
-            raise
-
-        # Finalize response
-        response = "".join(response_parts)
-        print_streaming_line()  # New line after streaming
-
-        logger.info(f"[execute_task_streaming] 完成 | response长度={len(response)} | tool_calls数量={len(tool_calls)} | stop_reason={stop_reason}")
-
-        return ChatResult(text=response, tool_calls=tool_calls, stop_reason=stop_reason)
-
     async def chat(self):
         """Run interactive chat"""
         print_welcome()
@@ -1139,16 +587,10 @@ class NexusCLI(ModelProvider):
                             self.messages,
                             self.current_title
                         )
-                        # Auto Memory: let LLM decide what to remember
-                        if len(self.messages) > 4:
-                            try:
-                                count = await self.auto_memory_manager.process_session(
-                                    self.messages, self.session_id, self.model_adapter
-                                )
-                                if count > 0:
-                                    logger.info(f"Auto Memory: saved {count} memories")
-                            except Exception as e:
-                                logger.warning(f"Auto Memory: failed: {e}")
+                        # Auto Memory
+                        count = await self._process_auto_memory()
+                        if count > 0:
+                            logger.info(f"Auto Memory: saved {count} memories")
                         console.print(f"\n[dim]会话已保存:[/dim] {self.memory_manager.memory_dir / f'{self.session_id}.md'}")
                     console.print("\n[cyan]再见![/cyan]")
                     break
@@ -1187,15 +629,9 @@ class NexusCLI(ModelProvider):
                             self.current_title
                         )
                         # Auto Memory
-                        if len(self.messages) > 4:
-                            try:
-                                count = await self.auto_memory_manager.process_session(
-                                    self.messages, self.session_id, self.model_adapter
-                                )
-                                if count > 0:
-                                    logger.info(f"Auto Memory: saved {count} memories")
-                            except Exception as e:
-                                logger.warning(f"Auto Memory: failed: {e}")
+                        count = await self._process_auto_memory()
+                        if count > 0:
+                            logger.info(f"Auto Memory: saved {count} memories")
                         print_saved(str(self.memory_manager.memory_dir / f'{self.session_id}.md'))
                     console.print("[cyan]再见![/cyan]")
                     break
@@ -1240,15 +676,9 @@ class NexusCLI(ModelProvider):
                             self.current_title
                         )
                         # Auto Memory
-                        if len(self.messages) > 4:
-                            try:
-                                count = await self.auto_memory_manager.process_session(
-                                    self.messages, self.session_id, self.model_adapter
-                                )
-                                if count > 0:
-                                    logger.info(f"Auto Memory: saved {count} memories")
-                            except Exception as e:
-                                logger.warning(f"Auto Memory: failed: {e}")
+                        count = await self._process_auto_memory()
+                        if count > 0:
+                            logger.info(f"Auto Memory: saved {count} memories")
                         console.print("[dim]会话已保存[/dim]")
                     self.messages = []
                     self.session_id = str(uuid.uuid4())
@@ -1271,15 +701,9 @@ class NexusCLI(ModelProvider):
                         self.current_title
                     )
                     # Auto Memory
-                    if len(self.messages) > 4:
-                        try:
-                            count = await self.auto_memory_manager.process_session(
-                                self.messages, self.session_id, self.model_adapter
-                            )
-                            if count > 0:
-                                logger.info(f"Auto Memory: saved {count} memories")
-                        except Exception as e:
-                            logger.warning(f"Auto Memory: failed: {e}")
+                    count = await self._process_auto_memory()
+                    if count > 0:
+                        logger.info(f"Auto Memory: saved {count} memories")
                     console.print(f"\n[dim]会话已保存:[/dim] {self.memory_manager.memory_dir / f'{self.session_id}.md'}")
                 console.print("\n[cyan]再见![/cyan]")
                 break
@@ -1309,15 +733,9 @@ class NexusCLI(ModelProvider):
                 self.current_title
             )
             # Auto Memory
-            if len(self.messages) > 4 and hasattr(self, 'auto_memory_manager'):
-                try:
-                    count = await self.auto_memory_manager.process_session(
-                        self.messages, self.session_id, self.model_adapter
-                    )
-                    if count > 0:
-                        logger.info(f"Auto Memory: saved {count} memories")
-                except Exception as e:
-                    logger.warning(f"Auto Memory: failed: {e}")
+            count = await self._process_auto_memory()
+            if count > 0:
+                logger.info(f"Auto Memory: saved {count} memories")
         await self.mcp_client.disconnect_all()
 
     def _list_sessions(self) -> None:
@@ -1439,10 +857,7 @@ class NexusCLI(ModelProvider):
             console.print("[red]请输入有效的编号[/red]")
 
     def _handle_settings(self) -> None:
-        """
-        @brief 处理 /settings 命令
-        @details 显示设置菜单并根据用户选择执行相应操作
-        """
+        """Handle /settings command — show settings menu and process user choices."""
         print_settings_menu()
         console.print("\n[cyan]输入选项编号，或输入 'c' 取消[/cyan]")
 
@@ -1463,10 +878,7 @@ class NexusCLI(ModelProvider):
             console.print(f"[red]操作失败: {str(e)}[/red]")
 
     def _update_provider_info(self) -> None:
-        """
-        @brief 更新供应商信息
-        @details 显示供应商选择列表，获取用户配置并保存
-        """
+        """Update provider info — show provider list, get config, save."""
         print_provider_select()
         console.print("\n[cyan]输入选项编号，或输入 'c' 取消[/cyan]")
 
@@ -1591,10 +1003,7 @@ class NexusCLI(ModelProvider):
             console.print(f"[red]配置失败: {str(e)}[/red]")
 
     def _change_default_provider(self) -> None:
-        """
-        @brief 更换默认供应商
-        @details 显示已配置的供应商列表，让用户选择默认供应商
-        """
+        """Change default provider — show configured providers, let user select default."""
         providers = get_configured_providers(self.config)
 
         if not providers:
@@ -1629,15 +1038,10 @@ class NexusCLI(ModelProvider):
             console.print(f"[red]操作失败: {str(e)}[/red]")
 
     def _reinit_model_adapter(self) -> None:
-        """
-        @brief 重新初始化模型适配器
-        @details 根据当前配置重新创建模型适配器
-        """
+        """Reinitialize the model adapter from current config."""
         model_config = self.config.get("models", {})
-        self.model_adapter = self._create_model_adapter(model_config)
-
-        # Update current adapter for subagent access
-        self.set_adapter(self.model_adapter)
+        new_adapter = self._create_model_adapter(model_config)
+        self.set_adapter(new_adapter)  # recreates AgentSession with fresh state
 
         console.print(f"[green]已切换到模型: {self.model_adapter.get_name()}[/green]")
 
@@ -1649,7 +1053,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Nexus - Personal AI Agent")
     parser.add_argument("task", nargs="?", help="Task to execute")
     parser.add_argument("--config", default=None, help="Config file path")
-    parser.add_argument("--model", choices=["anthropic", "openai", "ollama", "lmstudio", "custom", "minimax", "xai"], help="Model to use")
+    parser.add_argument("--model", choices=AdapterRegistry.list_providers(), help="Model to use")
 
     args = parser.parse_args()
 

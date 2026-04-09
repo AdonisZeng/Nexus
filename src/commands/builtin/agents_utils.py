@@ -6,7 +6,6 @@ from typing import Optional
 
 from src.tools.subagent import SubagentConfig, SubagentRegistry
 from src.tools import global_registry
-from src.adapters import get_current_adapter
 
 
 AGENTS_DIR = Path.home() / ".nexus" / "agents"
@@ -82,13 +81,13 @@ class AgentConfigEditor:
     @staticmethod
     async def auto_generate_agent(
         raw_description: str,
+        adapter,
         inherited_tools: Optional[list[str]] = None
     ) -> SubagentConfig:
         """
         Auto-generate agent configuration from user description.
         Calls LLM to generate name, description, and system_prompt.
         """
-        adapter = get_current_adapter()
         if not adapter:
             raise RuntimeError("No model adapter available")
 

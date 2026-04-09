@@ -32,10 +32,10 @@ class SubagentRunner:
         """Create a tool registry with only allowed tools, excluding denied tools"""
         filtered = ToolRegistry()
 
-        # 获取所有可用的工具（始终排除嵌套 subagent）
+        # 获取所有可用的工具（始终排除嵌套 subagent 和 team）
         available_tools = {
             name: tool for name, tool in self.tool_registry.tools.items()
-            if name != "subagent"
+            if name not in ("subagent", "team")
         }
 
         if not self.config.allowed_tools and not self.config.denied_tools:
@@ -58,7 +58,7 @@ class SubagentRunner:
         return filtered
 
     async def _compress_context_llm(self, context: AgentContext) -> bool:
-        """使用 LLM 智能压缩上下文。
+        """使用 LLM 智能压缩上下文。单一实现在 LLMContextCompressor。
 
         Args:
             context: AgentContext to compress
@@ -66,63 +66,8 @@ class SubagentRunner:
         Returns:
             True if compression succeeded
         """
-        messages = context.short_term_memory
-        if not messages:
-            return False
-
-        # 分离 system 和非 system 消息
-        system_msgs = [m for m in messages if m.role == "system"]
-        non_system_msgs = [m for m in messages if m.role != "system"]
-
-        if len(non_system_msgs) <= 2:
-            return False
-
-        # 格式化消息给 LLM
-        conversation = "\n".join([
-            f"{m.role}: {m.content[:500]}"
-            for m in non_system_msgs
-        ])
-
-        summarize_prompt = f"""你是一个上下文压缩助手。请提炼以下对话的精简摘要，
-保留关键信息、决策、进展和重要细节。摘要应该简洁但信息完整。
-
-对话内容：
-{conversation}
-
-请直接返回摘要内容，不需要额外解释。摘要格式：
-[对话摘要]
-- 关键主题：xxx
-- 重要进展：xxx
-- 待处理事项：xxx
-- 关键细节：xxx
-"""
-
-        try:
-            # 调用 LLM 生成摘要
-            response = await self.adapter.chat(
-                [{"role": "user", "content": summarize_prompt}],
-                ""
-            )
-
-            if not response:
-                logger.warning("[SubagentRunner] LLM 摘要返回为空，回退到简单压缩")
-                return False
-
-            # 用摘要替换非 system 消息
-            context.short_term_memory = system_msgs + [
-                context.add_message(
-                    role="system",
-                    content=f"[对话摘要]\n{response}",
-                    token_count=len(response) // 4
-                )
-            ]
-
-            logger.info(f"[SubagentRunner] LLM 压缩完成，摘要长度: {len(response)}")
-            return True
-
-        except Exception as e:
-            logger.error(f"[SubagentRunner] LLM 压缩失败: {e}")
-            return False
+        from src.context.core import LLMContextCompressor
+        return await LLMContextCompressor.compress_context(context, self.adapter)
 
     def _create_isolated_context(self) -> AgentContext:
         """Create an isolated AgentContext for this subagent"""
@@ -251,9 +196,6 @@ class SubagentRunner:
                 f"stop_reason={stop_reason}"
             )
 
-            # Token tracking uses context's calculation at end of execution
-            pass  # Tokens calculated at end via context.calculate_total_tokens()
-
             # If no tool calls, return early for confirmation check
             if not tool_calls:
                 return (response, [], stop_reason)
@@ -264,6 +206,7 @@ class SubagentRunner:
             for tc in tool_calls:
                 tool_name = tc.get("name")
                 tool_args = tc.get("arguments", {})
+                tool_id = tc.get("id", f"tc_{iterations}_{tool_name}")
 
                 # Skip nested subagent calls to prevent infinite recursion
                 if tool_name == "subagent":
@@ -283,8 +226,6 @@ class SubagentRunner:
                         "skip_reason": "nested_subagent_blocked"
                     })
                     continue
-
-                tool_id = tc.get("id", f"tc_{iterations}_{tool_name}")
                 tool_call_history.append({
                     "id": tool_id,
                     "name": tool_name,

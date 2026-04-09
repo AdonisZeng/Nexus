@@ -69,12 +69,12 @@ class PlanModeWorkItemSource(WorkItemSource):
 class PlanModeManager:
     """计划模式管理器"""
 
-    def __init__(self, cli_instance):
+    def __init__(self, session):
         """
         @brief 初始化计划模式管理器
-        @param cli_instance NexusCLI 实例
+        @param session AgentSession 实例（提供 model_adapter, system_prompt, execute_task）
         """
-        self.cli = cli_instance
+        self.cli = session  # kept as self.cli for minimal diff; now an AgentSession
         self.active = False
         self.tasks: list[TaskItem] = []
         self.current_task_index: int = -1

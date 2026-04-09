@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.config import load_config
 from src.cli.main import NexusCLI
 from src.utils import setup_logger, get_logger
+from src.adapters import AdapterRegistry
 
 
 def main():
@@ -63,7 +64,7 @@ def main():
     parser = argparse.ArgumentParser(description="Nexus - Personal AI Agent")
     parser.add_argument("task", nargs="?", help="要执行的任务")
     parser.add_argument("--config", type=str, default=None, help="配置文件路径")
-    parser.add_argument("--model", choices=["anthropic", "openai", "ollama", "lmstudio", "custom"], help="使用的模型")
+    parser.add_argument("--model", choices=AdapterRegistry.list_providers(), help="使用的模型")
     args = parser.parse_args()
 
     logger.debug(f"命令行参数: {vars(args)}")

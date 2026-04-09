@@ -7,8 +7,10 @@ import time
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
+from src.tools.registry import Tool
+
 if TYPE_CHECKING:
-    from src.tools.registry import Tool
+    from src.adapters.provider import ModelProvider
 
 from .database import Database
 from .event_bus import EventBus
@@ -23,8 +25,7 @@ from .teammate import Teammate
 from .monitor import TeamMonitor
 from .task_board import TaskBoard
 from .worktree_manager import WorktreeManager
-from src.utils import get_logger
-from src.cli.rich_ui import console
+from src.utils import get_logger, get_output_sink
 from rich.live import Live
 from rich.table import Table
 from rich.box import ROUNDED
@@ -66,7 +67,7 @@ class TeamPanelState:
     last_throttle_time: float = 0.0
 
 
-class TeamTool:  # Inherits from Tool at runtime via registration
+class TeamTool(Tool):
     """Tool for creating and managing Agent Teams
 
     This tool allows the main agent (Lead) to:
@@ -79,7 +80,7 @@ class TeamTool:  # Inherits from Tool at runtime via registration
     - Track shutdown and plan approval requests
     """
 
-    def __init__(self):
+    def __init__(self, provider: Optional["ModelProvider"] = None):
         self.storage = TeamStorage()
         self.message_bus = MessageBus(self.storage)
         self.manager = TeamManager(self.storage, self.message_bus)
@@ -98,6 +99,13 @@ class TeamTool:  # Inherits from Tool at runtime via registration
         self._team_name_for_live: Optional[str] = None
         self._THROTTLE_INTERVAL: float = 1.0  # Minimum seconds between renders
         self._TASK_BOARD_CACHE_TTL: float = 5.0  # Task board cache TTL
+        self._provider = provider  # ModelProvider for explicit adapter injection
+
+    def _get_adapter(self):
+        """Get model adapter from injected provider, or None if not available."""
+        if self._provider is not None:
+            return self._provider.get_adapter()
+        return None
 
     @property
     def name(self) -> str:
@@ -301,7 +309,8 @@ team(action="list_tasks", team_name="my-team")
             valid_actions = ", ".join(sorted(self._HANDLERS.keys()))
             return f"Error: Unknown action '{action}'. Valid actions: {valid_actions}"
 
-        return await handler(**kwargs)
+        kwargs.pop("action", None)
+        return await handler(self, **kwargs)
 
     # Action handlers dict - maps action name to handler method
     _HANDLERS = {
@@ -751,6 +760,7 @@ team(action="list_tasks", team_name="my-team")
             teammate = Teammate(
                 config=config,
                 message_bus=self.message_bus,
+                adapter=self._get_adapter(),
                 protocol_tools=member_protocol_tools,
                 task_board=task_board,
                 on_status_update=self._handle_status_update,
@@ -1383,10 +1393,12 @@ team(action="list_tasks", team_name="my-team")
 
         if self._live_instance is None:
             # 首次创建 Live 实例
+            sink = get_output_sink()
+            _rich_console = sink.get_console()
             self._live_instance = Live(
                 panel,
                 refresh_per_second=4,
-                console=console,
+                console=_rich_console,
                 transient=False,
             )
             self._live_instance.start()

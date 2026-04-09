@@ -74,7 +74,8 @@ async def create_agent_auto(context: CommandContext) -> AsyncIterator[CommandRes
             return
 
         # Generate agent using LLM
-        config = await AgentConfigEditor.auto_generate_agent(raw_description, inherited_tools)
+        adapter = context.cli.model_adapter if context.cli else None
+        config = await AgentConfigEditor.auto_generate_agent(raw_description, adapter, inherited_tools)
 
         # Show generated config
         console.print("\n[bold green]生成的配置：[/bold green]")

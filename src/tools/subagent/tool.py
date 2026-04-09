@@ -6,23 +6,12 @@ from src.tools.registry import Tool
 from src.tools.subagent.registry import SubagentRegistry
 from src.tools.subagent.runner import SubagentRunner
 from src.tools.subagent.models import SubagentResult
-from src.utils import get_logger
+from src.utils import get_logger, get_output_sink
 
 if TYPE_CHECKING:
     from src.adapters.provider import ModelProvider
 
 logger = get_logger("subagent.tool")
-
-# Lazy import to avoid circular dependency
-_console = None
-
-
-def _get_console():
-    global _console
-    if _console is None:
-        from src.cli.rich_ui import console
-        _console = console
-    return _console
 
 
 class SubagentTool(Tool):
@@ -123,8 +112,8 @@ class SubagentTool(Tool):
         tool_registry = self._get_tool_registry()
 
         # Show UI feedback
-        console = _get_console()
-        console.print(f"[dim]正在调用子代理 [{config.name}]...[/dim]")
+        sink = get_output_sink()
+        sink.print(f"[dim]正在调用子代理 [{config.name}]...[/dim]")
 
         # Run subagent
         runner = SubagentRunner(
@@ -135,7 +124,7 @@ class SubagentTool(Tool):
 
         result = await runner.run(prompt)
 
-        console.print(f"[dim]子代理 [{config.name}] 执行完成[/dim]")
+        sink.print(f"[dim]子代理 [{config.name}] 执行完成[/dim]")
 
         return self._format_result(config.name, result)
 
@@ -178,8 +167,8 @@ class SubagentTool(Tool):
         if not tasks:
             return "Error: parallel prompt format invalid"
 
-        console = _get_console()
-        console.print(f"[dim]正在并行调用 {len(tasks)} 个子代理...[/dim]")
+        sink = get_output_sink()
+        sink.print(f"[dim]正在并行调用 {len(tasks)} 个子代理...[/dim]")
 
         async def run_task(task: str) -> str:
             """Run a single task in the subagent"""
@@ -207,7 +196,7 @@ class SubagentTool(Tool):
             else:
                 formatted_results.append(result)
 
-        console.print(f"[dim]并行子代理调用完成[/dim]")
+        sink.print(f"[dim]并行子代理调用完成[/dim]")
 
         return "\n\n".join(formatted_results)
 

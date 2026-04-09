@@ -5,8 +5,14 @@
 """
 
 from .logger import setup_logger, get_logger
+from .output import OutputSink, SilentOutputSink, RichOutputSink, get_output_sink, set_output_sink
 
 __all__ = [
     "setup_logger",
     "get_logger",
+    "OutputSink",
+    "SilentOutputSink",
+    "RichOutputSink",
+    "get_output_sink",
+    "set_output_sink",
 ]

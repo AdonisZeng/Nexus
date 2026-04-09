@@ -70,12 +70,12 @@ class TasksModeManager:
     4. 按依赖顺序自动执行任务
     """
 
-    def __init__(self, cli_instance):
+    def __init__(self, session):
         """初始化 Tasks 模式管理器
 
-        @param cli_instance: NexusCLI 实例
+        @param session: AgentSession 实例（提供 model_adapter, system_prompt, execute_task）
         """
-        self.cli = cli_instance
+        self.cli = session  # kept as self.cli for minimal diff; now an AgentSession
         self.active = False
         self.task_manager: Optional[TaskManager] = None
         self.project_name: Optional[str] = None

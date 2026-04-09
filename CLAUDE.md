@@ -6,6 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Nexus is a personal AI Agent CLI application supporting multiple LLM providers (Anthropic, OpenAI, Ollama, LM Studio, xAI, MiniMax, Custom) and multi-agent collaboration. Built with Python, packaged as both CLI and standalone exe via PyInstaller.
 
+## Setup
+
+```bash
+# Install dependencies
+uv pip install -r requirements.txt
+
+# Config is auto-created from config.yaml.template on first run
+# API keys via environment variables: ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY, MINIMAX_API_KEY, CUSTOM_API_KEY
+```
+
 ## Running the Application
 
 ```bash
@@ -20,6 +30,13 @@ python main.py --model ollama
 
 # Custom config
 python main.py --config custom.yaml
+```
+
+## Building the Exe
+
+```bash
+python build.py
+# Output: dist/Nexus/Nexus.exe
 ```
 
 ## Architecture
@@ -55,12 +72,21 @@ Unified interface for LLM providers. Base class `ModelAdapter` defines `chat()`,
 - `rich_ui.py` - Rich console UI utilities
 - Plan mode and Tasks mode integration
 
+### Skills System (`src/skills/`)
+Dynamically loaded capabilities matched to user intent. Skills are registered at startup and selected by the `matcher` based on the prompt context.
+
+### Bootstrap (`src/bootstrap.py`)
+Handles exe runtime initialization: creates `logs/` directory, copies `config.yaml.template` → `config.yaml` if missing, ensures `~/.nexus/` exists.
+
 ## Working Modes
 
 1. **Normal Chat** - Simple Q&A with tool access
 2. **Plan Mode** (`/plan`) - Task decomposition with sequential execution
 3. **Tasks Mode** (`/tasks`) - DAG-based project tasks with persistence and parallel execution
 4. **Agent Team** - Multi-agent parallel collaboration via `team()` tool
+
+### Available Slash Commands
+`/plan`, `/tasks`, `/teams`, `/models`, `/sessions`, `/settings`, `/reload`, `/restore`, `/clear`, `/help`, `/exit`
 
 ## Key Patterns
 

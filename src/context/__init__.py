@@ -25,6 +25,7 @@ from src.agent.context import (
 from .core import (
     SkillMetadata,
     ContextCompressor,
+    LLMContextCompressor,
     SessionPersistence,
     SessionSummary,
     MemoryManager,
@@ -40,6 +41,7 @@ __all__ = [
     "AgentContext",
     "SkillMetadata",
     "ContextCompressor",
+    "LLMContextCompressor",
     "SessionPersistence",
     "SessionSummary",
     "MemoryManager",

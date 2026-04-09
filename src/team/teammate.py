@@ -18,7 +18,7 @@ from .message_bus import MessageBus
 from .storage import TeamStorage
 from .task_board import TaskBoard
 from src.agent.context import AgentContext, create_context
-from src.adapters import get_current_adapter, ModelAdapter
+from src.adapters import ModelAdapter
 from src.tools.registry import ToolRegistry, global_registry
 from src.utils import get_logger
 
@@ -64,7 +64,7 @@ class Teammate:
     ):
         self.config = config
         self.message_bus = message_bus
-        self.adapter = adapter or get_current_adapter()
+        self.adapter = adapter
         self.tool_registry = tool_registry or global_registry
         self.protocol_tools = protocol_tools
         self.task_board = task_board
@@ -370,15 +370,12 @@ class Teammate:
         logger.info(f"[Teammate:{self.name}] Executing tool: {tool_name}")
         logger.info(f"[Teammate:{self.name}] Tool args: {tool_args}")
 
-        # ========== 设置 protected_paths 的 worktree 上下文 ==========
-        # 这样 file_write 报错时可以获取正确的 worktree 路径
+        # Set protected_paths worktree context so file_write errors report correct paths
         from src.tools.protected_paths import protected_paths
         if self.worktree_path:
             protected_paths.set_current_worktree_path(self.worktree_path)
-        # ==========================================================
 
-        # ========== 工作目录路径验证 (修改) ==========
-        # 只限制写入操作，读取操作允许访问任务板等外部路径
+        # Validate path for mutating tools — restrict writes to worktree only
         if tool_name in PATH_REQUIRING_TOOLS and self.worktree_path:
             validation_error = self._validate_worktree_path(tool_name, tool_args)
             if validation_error:
@@ -387,8 +384,7 @@ class Teammate:
                 )
                 return validation_error
 
-        # ========== SPEC.md 写保护 ==========
-        # 禁止成员在 worktree 中创建或修改 SPEC.md
+        # Block SPEC.md writes in worktree — only Lead Agent manages it in work_root
         if tool_name == "file_write" and self.worktree_path:
             file_path = tool_args.get("file_path", "")
             if file_path.upper().endswith("SPEC.MD"):
@@ -398,7 +394,6 @@ class Teammate:
                 return ("Error: Cannot write SPEC.md to your worktree.\n"
                         "SPEC.md is created by Lead Agent in the work_root directory.\n"
                         "Do not create or modify SPEC.md in your worktree.")
-        # ==============================================
 
         tool = None
         if self.protocol_tools:
@@ -644,7 +639,7 @@ You can use the following tools: {', '.join(self.config.tools) if self.config.to
         self._status_report.current_action = f"收到警告: {msg.content}"
         await self._report_status()
 
-    # ========== 工作目录路径验证方法 (新增) ==========
+    # Path validation — ensures mutating operations stay within the member's worktree
 
     def _validate_worktree_path(self, tool_name: str, tool_args: dict) -> Optional[str]:
         """验证工具参数中的路径是否在 worktree 内"""

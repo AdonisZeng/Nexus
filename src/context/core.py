@@ -194,6 +194,113 @@ Conversation:
         return "\n\n".join(lines)
 
 
+class LLMContextCompressor:
+    """LLM-powered context summarization.
+
+    Single authoritative implementation replacing the three duplicate copies:
+      - NexusCLI._compress_context_llm  (cli/main.py)
+      - SubagentRunner._compress_context_llm  (tools/subagent/runner.py)
+      - AgentLoop.summarize_and_compress  (agent/loop.py, kept for callback compat)
+    """
+
+    SUMMARIZE_PROMPT = """你是一个上下文压缩助手。请提炼以下对话的精简摘要，\
+保留关键信息、决策、进展和重要细节。摘要应该简洁但信息完整。
+
+对话内容：
+{conversation}
+
+请直接返回摘要内容，不需要额外解释。摘要格式：
+[对话摘要]
+- 关键主题：xxx
+- 重要进展：xxx
+- 待处理事项：xxx
+- 关键细节：xxx
+"""
+
+    @staticmethod
+    async def compress_messages(
+        messages: list[dict],
+        adapter,
+        min_non_system: int = 2,
+    ) -> "list[dict] | None":
+        """Compress a flat list[dict] message history via LLM summarization.
+
+        Used by NexusCLI (operates on list[dict] format).
+
+        @param messages  The current message history
+        @param adapter   A ModelAdapter instance with .chat() method
+        @param min_non_system  Minimum non-system messages required to trigger compression
+        @return New compressed message list, or None if compression was skipped/failed
+        """
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+
+        if len(non_system) <= min_non_system:
+            return None
+
+        conversation = "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')[:500]}"
+            for m in non_system
+        )
+        prompt = LLMContextCompressor.SUMMARIZE_PROMPT.format(conversation=conversation)
+
+        try:
+            response = await adapter.chat(
+                [{"role": "user", "content": prompt}], ""
+            )
+            if not response:
+                return None
+            summary_msg = {"role": "system", "content": f"[对话摘要]\n{response}"}
+            return system_msgs + [summary_msg]
+        except Exception:
+            return None
+
+    @staticmethod
+    async def compress_context(
+        context,
+        adapter,
+        min_non_system: int = 2,
+    ) -> bool:
+        """Compress an AgentContext's short_term_memory via LLM summarization.
+
+        Used by SubagentRunner and AgentLoop (operates on AgentContext format).
+
+        @param context   An AgentContext instance
+        @param adapter   A ModelAdapter instance with .chat() method
+        @param min_non_system  Minimum non-system messages required to trigger compression
+        @return True if compression succeeded, False otherwise
+        """
+        msgs = context.short_term_memory
+        system_msgs = [m for m in msgs if m.role == "system"]
+        non_system = [m for m in msgs if m.role != "system"]
+
+        if len(non_system) <= min_non_system:
+            return False
+
+        conversation = "\n".join(
+            f"{m.role}: {m.content[:500]}" for m in non_system
+        )
+        prompt = LLMContextCompressor.SUMMARIZE_PROMPT.format(conversation=conversation)
+
+        try:
+            response = await adapter.chat(
+                [{"role": "user", "content": prompt}], ""
+            )
+            if not response:
+                return False
+            # Import here to avoid circular import at module level
+            from src.agent.context import ContextMessage
+            summary = ContextMessage(
+                role="system",
+                content=f"[对话摘要]\n{response}",
+                token_count=len(response) // 4,
+            )
+            context.short_term_memory = system_msgs + [summary]
+            return True
+        except Exception:
+            return False
+
+
 class SessionPersistence:
     """Save and load session state."""
 
