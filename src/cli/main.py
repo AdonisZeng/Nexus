@@ -707,6 +707,25 @@ class NexusCLI(ModelProvider):
                     console.print(f"\n[dim]会话已保存:[/dim] {self.memory_manager.memory_dir / f'{self.session_id}.md'}")
                 console.print("\n[cyan]再见![/cyan]")
                 break
+            except asyncio.CancelledError:
+                if self.plan_mode:
+                    self.exit_plan_mode()
+                    console.print("\n[yellow]已退出计划模式[/yellow]")
+                else:
+                    console.print("\n[yellow]任务已中断[/yellow]")
+                break
+            except RuntimeError as e:
+                # When CancelledError escapes an async generator, Python raises
+                # RuntimeError: cannot reuse already awaited coroutine. Re-raise as
+                # CancelledError so it propagates correctly.
+                if "cannot reuse already awaited" in str(e):
+                    if self.plan_mode:
+                        self.exit_plan_mode()
+                        console.print("\n[yellow]已退出计划模式[/yellow]")
+                    else:
+                        console.print("\n[yellow]任务已中断[/yellow]")
+                    break
+                print_error_output(str(e))
             except Exception as e:
                 print_error_output(str(e))
 
