@@ -1,5 +1,6 @@
 """Subagent runner - executes subagent tasks in isolated context"""
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 from src.agent.context import create_context, AgentContext
@@ -10,6 +11,9 @@ from src.tools.context import ToolContext, ToolGate
 from src.utils import get_logger
 
 from .models import SubagentConfig, SubagentResult
+from .hooks import HookRunner
+from .permission import PermissionEnforcer
+from .parameter_validator import ToolParameterValidator
 
 logger = get_logger("subagent.runner")
 
@@ -27,6 +31,24 @@ class SubagentRunner:
         self.adapter = adapter
         self.tool_registry = tool_registry
         self._filtered_registry: Optional[ToolRegistry] = None
+        self._permission_enforcer: PermissionEnforcer = PermissionEnforcer(
+            config.permission_mode,
+            tool_registry=tool_registry
+        )
+        # Initialize hook runner once
+        if config.hooks:
+            self._hook_runner = HookRunner(
+                hooks=config.hooks,
+                env=dict(config.env) if config.env else {},
+                cwd=Path(config.cwd) if config.cwd and Path(config.cwd).exists() else None,
+            )
+        else:
+            self._hook_runner = None
+        # Initialize parameter validator once
+        if config.tool_parameters:
+            self._param_validator = ToolParameterValidator(config.tool_parameters)
+        else:
+            self._param_validator = None
 
     def _create_filtered_registry(self) -> ToolRegistry:
         """Create a tool registry with only allowed tools, excluding denied tools"""
@@ -57,6 +79,16 @@ class SubagentRunner:
 
         return filtered
 
+    def _get_isolated_cwd(self) -> Optional[Path]:
+        """Get isolated working directory if configured"""
+        if self.config.cwd:
+            cwd = Path(self.config.cwd)
+            if cwd.exists() and cwd.is_dir():
+                return cwd
+            else:
+                logger.warning(f"[SubagentRunner] Configured cwd does not exist: {cwd}")
+        return None
+
     async def _compress_context_llm(self, context: AgentContext) -> bool:
         """使用 LLM 智能压缩上下文。单一实现在 LLMContextCompressor。
 
@@ -85,6 +117,11 @@ class SubagentRunner:
         full_system_prompt = f"{time_info}\n\n{self.config.system_prompt}"
         context.add_system_message(full_system_prompt)
 
+        # Store isolation config in context metadata
+        isolated_cwd = self._get_isolated_cwd()
+        if isolated_cwd:
+            context.metadata["isolated_cwd"] = str(isolated_cwd)
+
         return context
 
     async def run(self, prompt: str) -> SubagentResult:
@@ -102,6 +139,9 @@ class SubagentRunner:
         tool_gate = ToolGate()
         tool_orchestrator = ToolOrchestrator(gate=tool_gate)
 
+        # Get isolated cwd for tool execution
+        isolated_cwd = self._get_isolated_cwd()
+
         # Get tool schemas for LLM
         tools = filtered_registry.get_tools_schema()
 
@@ -114,7 +154,9 @@ class SubagentRunner:
 
         logger.info(
             f"[SubagentRunner] 开始执行 (AgentLoop模式) | max_iterations={context.state.max_iterations} | "
-            f"可用工具={[t['name'] for t in tools]}"
+            f"可用工具={[t['name'] for t in tools]} | "
+            f"permission_mode={self.config.permission_mode} | "
+            f"cwd={isolated_cwd}"
         )
 
         tool_call_history = []
@@ -159,6 +201,12 @@ class SubagentRunner:
             nonlocal messages, system_prompt, iterations, tool_call_history
 
             iterations += 1
+
+            # Run iteration_start hooks
+            if self._hook_runner:
+                hook_result = await self._hook_runner.run_iteration_start(iterations)
+                for msg in hook_result.messages:
+                    context.add_user_message(f"[Hook note]: {msg}")
 
             # Context compression check
             # Tier-2: micro-compact older tool results before threshold check
@@ -212,6 +260,66 @@ class SubagentRunner:
                 tool_args = tc.get("arguments", {})
                 tool_id = tc.get("id", f"tc_{iterations}_{tool_name}")
 
+                # Run pre-tool hooks
+                if self._hook_runner:
+                    hook_result = await self._hook_runner.run_pre_tool(tool_name, tool_args)
+                    for msg in hook_result.messages:
+                        context.add_user_message(f"[Hook message]: {msg}")
+                    # If hook blocked, skip tool execution
+                    if hook_result.blocked:
+                        logger.info(f"[SubagentRunner] Tool {tool_name} blocked by hook")
+                        context.add_tool_message(
+                            f"[Blocked by hook]",
+                            tool_name=tool_name
+                        )
+                        tool_call_history.append({
+                            "id": tool_id,
+                            "name": tool_name,
+                            "arguments": tool_args,
+                            "skipped": True,
+                            "skip_reason": "blocked_by_hook"
+                        })
+                        continue
+                    # Update tool_args if hook provided updated_input
+                    if hook_result.updated_input:
+                        tool_args = hook_result.updated_input
+                        tc["arguments"] = tool_args
+
+                # Check permission mode
+                is_allowed, reason = self._permission_enforcer.is_tool_allowed(tool_name)
+                if not is_allowed:
+                    logger.info(f"[SubagentRunner] Tool {tool_name} blocked by permission mode: {reason}")
+                    context.add_tool_message(
+                        f"[Blocked] {reason}",
+                        tool_name=tool_name
+                    )
+                    tool_call_history.append({
+                        "id": tool_id,
+                        "name": tool_name,
+                        "arguments": tool_args,
+                        "skipped": True,
+                        "skip_reason": f"permission_denied: {reason}"
+                    })
+                    continue
+
+                # Validate tool parameters
+                if self._param_validator:
+                    is_valid, error = self._param_validator.validate(tool_name, tool_args)
+                    if not is_valid:
+                        logger.info(f"[SubagentRunner] Tool {tool_name} parameter validation failed: {error}")
+                        context.add_tool_message(
+                            f"[Blocked] Parameter validation failed: {error}",
+                            tool_name=tool_name
+                        )
+                        tool_call_history.append({
+                            "id": tool_id,
+                            "name": tool_name,
+                            "arguments": tool_args,
+                            "skipped": True,
+                            "skip_reason": f"parameter_validation_failed: {error}"
+                        })
+                        continue
+
                 # Skip nested subagent calls to prevent infinite recursion
                 if tool_name == "subagent":
                     skip_message = (
@@ -230,6 +338,7 @@ class SubagentRunner:
                         "skip_reason": "nested_subagent_blocked"
                     })
                     continue
+
                 tool_call_history.append({
                     "id": tool_id,
                     "name": tool_name,
@@ -241,7 +350,7 @@ class SubagentRunner:
                     tool_context = ToolContext(
                         tool_name=tool_name,
                         args=tool_args,
-                        cwd=None,
+                        cwd=isolated_cwd or None,
                         tracker=None,
                         gate=tool_gate,
                         metadata={},
@@ -257,10 +366,23 @@ class SubagentRunner:
                     preview = persist_tool_output(tc.get("id", f"tool_{tool_name}"), result_str)
                     logger.info(f"[SubagentRunner] 工具 {tool_name} 执行完成")
                     context.add_tool_message(preview, tool_name=tool_name)
+
+                    # Run post-tool hooks
+                    if self._hook_runner:
+                        hook_result = await self._hook_runner.run_post_tool(tool_name, tool_args, result_str)
+                        for msg in hook_result.messages:
+                            context.add_tool_message(f"[Hook note]: {msg}", tool_name=tool_name)
+
                 except Exception as e:
                     error_msg = f"Error: {str(e)}"
                     logger.error(f"[SubagentRunner] 工具 {tool_name} 执行失败: {e}")
                     context.add_tool_message(error_msg, tool_name=tool_name)
+
+                    # Run error hooks
+                    if self._hook_runner:
+                        hook_result = await self._hook_runner.run_post_tool(tool_name, tool_args, error_msg)
+                        for msg in hook_result.messages:
+                            context.add_tool_message(f"[Hook error note]: {msg}", tool_name=tool_name)
 
             # Update messages for next iteration
             messages = context.get_messages_for_api()
@@ -282,6 +404,11 @@ class SubagentRunner:
             iterations = loop.state.iteration
             # Use context's accurate token calculation
             total_tokens = context.calculate_total_tokens()
+
+            # Run terminated hooks
+            if self._hook_runner:
+                await self._hook_runner.run_terminated("completed")
+
             return SubagentResult(
                 success=True,
                 output=final_response if final_response else "[无输出]",
@@ -291,6 +418,9 @@ class SubagentRunner:
             )
         except asyncio.TimeoutError:
             total_tokens = context.calculate_total_tokens()
+            # Run error hooks
+            if self._hook_runner:
+                await self._hook_runner.run_terminated("timeout")
             return SubagentResult(
                 success=False,
                 output="",
@@ -302,6 +432,9 @@ class SubagentRunner:
         except Exception as e:
             logger.error(f"Subagent execution failed: {e}")
             total_tokens = context.calculate_total_tokens()
+            # Run error hooks
+            if self._hook_runner:
+                await self._hook_runner.run_terminated(f"error: {str(e)}")
             return SubagentResult(
                 success=False,
                 output="",

@@ -112,7 +112,7 @@ class ToolRegistry:
         from .code import CodeExecTool
         from .patch import FilePatchTool
         from .list_dir import ListDirTool
-        from .subagent import SubagentTool
+        from .subagent import SubagentTool, CheckSubagentTool
         from .background_tools import BackgroundRunTool, CheckBackgroundTool
         from .todo import TodoTool
 
@@ -124,6 +124,7 @@ class ToolRegistry:
         self.register(ShellTool())
         self.register(CodeExecTool())
         self.register(SubagentTool())
+        self.register(CheckSubagentTool())
         self.register(BackgroundRunTool())
         self.register(CheckBackgroundTool())
         self.register(TodoTool())

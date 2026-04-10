@@ -6,6 +6,7 @@ from src.tools.registry import ModelProviderMixin, Tool
 from src.tools.subagent.registry import SubagentRegistry
 from src.tools.subagent.runner import SubagentRunner
 from src.tools.subagent.models import SubagentResult
+from src.tools.subagent.background_manager import get_bg_subagent_manager
 from src.utils import get_logger, get_output_sink
 
 if TYPE_CHECKING:
@@ -67,13 +68,15 @@ class SubagentTool(ModelProviderMixin, Tool):
 
 参数:
 - prompt (string, 必填): 给子代理的完整任务指令，包含任务目标、所需上下文和输出格式要求。LLM应根据可用代理和用户问题构造合适的prompt。
-- agent (string, 可选): 子代理名称。建议明确指定以确保调用正确的代理。"""
+- agent (string, 可选): 子代理名称。建议明确指定以确保调用正确的代理。
+- background (boolean, 可选): 是否后台执行。如果为true，立即返回task_id，任务在后台运行。"""
         )
 
     async def execute(
         self,
         prompt: str,
         agent: Optional[str] = None,
+        background: bool = False,
         **kwargs: Any
     ) -> str:
         """
@@ -82,9 +85,11 @@ class SubagentTool(ModelProviderMixin, Tool):
         Args:
             prompt: The task instruction for the subagent
             agent: Optional subagent name. If not provided, auto-routes based on prompt
+            background: If True, run subagent in background and return task_id immediately
 
         Returns:
-            The subagent's final output message
+            For background=False: The subagent's final output message
+            For background=True: "Background task {task_id} started: {prompt[:80]}..."
         """
         self._ensure_loaded()
 
@@ -104,6 +109,10 @@ class SubagentTool(ModelProviderMixin, Tool):
             available = ", ".join(self._registry.list_agents()) if self._registry.agents else "none"
             return f"Error: No suitable subagent found. Available: [{available}]"
 
+        # Check if subagent config wants background execution
+        if config.background:
+            background = True
+
         # Get adapter and tool registry
         adapter = self._get_adapter()
         if not adapter:
@@ -111,11 +120,24 @@ class SubagentTool(ModelProviderMixin, Tool):
 
         tool_registry = self._get_tool_registry()
 
-        # Show UI feedback
+        # Background execution path
+        if background:
+            return await self._execute_background(config, prompt, adapter, tool_registry)
+
+        # Synchronous execution path
+        return await self._execute_sync(config, prompt, adapter, tool_registry)
+
+    async def _execute_sync(
+        self,
+        config: Any,
+        prompt: str,
+        adapter: Any,
+        tool_registry: Any
+    ) -> str:
+        """Execute subagent synchronously (blocking)"""
         sink = get_output_sink()
         sink.print(f"[dim]正在调用子代理 [{config.name}]...[/dim]")
 
-        # Run subagent
         runner = SubagentRunner(
             config=config,
             adapter=adapter,
@@ -127,6 +149,30 @@ class SubagentTool(ModelProviderMixin, Tool):
         sink.print(f"[dim]子代理 [{config.name}] 执行完成[/dim]")
 
         return self._format_result(config.name, result)
+
+    async def _execute_background(
+        self,
+        config: Any,
+        prompt: str,
+        adapter: Any,
+        tool_registry: Any
+    ) -> str:
+        """Execute subagent in background (non-blocking)"""
+        bg_manager = get_bg_subagent_manager()
+
+        # Create runner factory (closure over config, adapter, tool_registry)
+        async def runner_factory():
+            return SubagentRunner(
+                config=config,
+                adapter=adapter,
+                tool_registry=tool_registry,
+            )
+
+        sink = get_output_sink()
+        sink.print(f"[dim]正在后台调用子代理 [{config.name}]...[/dim]")
+
+        task_id = await bg_manager.run(config.name, prompt, runner_factory)
+        return f"Background task {task_id} started: {prompt[:80]}..."
 
     def _resolve_agent(
         self,
@@ -241,10 +287,52 @@ class SubagentTool(ModelProviderMixin, Tool):
                 "agent": {
                     "type": "string",
                     "description": f"子代理名称（可选）。可用代理: {agent_names}。建议明确指定以确保调用正确的代理。"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "是否后台执行。如果为true，立即返回task_id，任务在后台运行。可用代理: " + agent_names
                 }
             },
             "required": ["prompt"]
         }
 
 
-__all__ = ["SubagentTool"]
+class CheckSubagentTool(ModelProviderMixin, Tool):
+    """Tool for checking status of background subagent tasks"""
+
+    is_mutating = False
+    requires_approval = False
+
+    @property
+    def name(self) -> str:
+        return "check_subagent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "检查后台子代理任务状态。\n"
+            "Without task_id: 列出所有后台子代理任务。\n"
+            "With task_id: 显示该任务的状态和结果。\n"
+            "参数: task_id (string, 可选) - 要检查的任务 ID"
+        )
+
+    async def execute(self, task_id: Optional[str] = None, **kwargs: Any) -> str:
+        """Check status of background subagent tasks"""
+        from src.tools.subagent.background_manager import get_bg_subagent_manager
+        bg_manager = get_bg_subagent_manager()
+        return await bg_manager.check(task_id)
+
+    def _get_input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "要检查的任务 ID。如果不提供，列出所有后台任务。"
+                }
+            },
+            "required": []
+        }
+
+
+__all__ = ["SubagentTool", "CheckSubagentTool"]
