@@ -25,6 +25,7 @@ import re
 from .context import AgentContext, ConversationState, ToolCallEntry, ContextMessage
 from .work_item import WorkItemSource, WorkItem
 from src.tools.tracker import ToolCallTracker
+from src.hooks import HookRunner
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ class AgentLoop:
         on_work_item_confirmation: Optional[Callable[[str], Awaitable[Optional[bool]]]] = None,
         on_user_confirmation: Optional[Callable[[list[str]], Awaitable[Optional[bool]]]] = None,
         on_confirmation_check: Optional[Callable[[str, str], Awaitable[Optional[bool]]]] = None,
+        hook_runner: Optional[HookRunner] = None,
     ):
         """
         Initialize the agent loop.
@@ -187,6 +189,9 @@ class AgentLoop:
         # Stop reason tracking for confirmation flow (SubagentRunner)
         self._last_stop_reason: Optional[str] = None
         self._on_confirmation_check = on_confirmation_check
+
+        # Hook runner for global hooks
+        self._hook_runner = hook_runner
 
     def record_tool_call(self, tool_name: str, args: dict, result: Any, success: bool):
         """Record a tool call and update metrics."""
@@ -583,6 +588,12 @@ class AgentLoop:
         self.context.state.increment_iteration()
         self._iteration_start_time = time.time()
 
+        # Run iteration_start hooks
+        if self._hook_runner:
+            await self._hook_runner.run_iteration_start(
+                iteration=self.context.state.iteration
+            )
+
         logger.info(f"Starting iteration {self.context.state.iteration}/{self.context.state.max_iterations}")
 
         await self.callbacks.emit(
@@ -609,6 +620,12 @@ class AgentLoop:
             success=success,
             elapsed=elapsed
         )
+
+        # Run iteration_end hooks
+        if self._hook_runner:
+            await self._hook_runner.run_iteration_end(
+                iteration=self.context.state.iteration
+            )
 
     async def execute_with_tools(
         self,
@@ -707,6 +724,10 @@ class AgentLoop:
         start_time = time.time()
         response = ""
         tool_calls = []
+
+        # Run agent_start hooks
+        if self._hook_runner:
+            await self._hook_runner.run_agent_start()
 
         logger.info(
             f"Starting agent loop: max_iterations={self.context.state.max_iterations}, "
@@ -826,6 +847,10 @@ class AgentLoop:
             reason=reason,
             iteration=self.context.state.iteration
         )
+
+        # Run agent_end hooks
+        if self._hook_runner:
+            await self._hook_runner.run_agent_end(reason=reason)
 
     def get_status(self) -> dict:
         """Get current loop status."""

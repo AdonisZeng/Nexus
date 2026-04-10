@@ -336,6 +336,9 @@ class NexusCLI(ModelProvider):
         # 添加命令列表到 system prompt
         commands_info = self._build_commands_prompt()
 
+        # 添加 hook 配置信息
+        hooks_info = self._build_hooks_prompt()
+
         # 加载 NEXUS.md 内容（项目知识）
         nexus_content = NexusMDLoader.load_and_merge(Path(self._session.cwd))
         nexus_section = ""
@@ -355,7 +358,7 @@ class NexusCLI(ModelProvider):
         # 合并到 system_prompt
         base_prompt = self.config.get("system_prompt", "You are Nexus, a helpful AI assistant.")
         parts = [base_prompt, time_info, workspace_info, commands_info,
-                 skills_dir_info, tools_prompt, nexus_section, memories_section]
+                 skills_dir_info, tools_prompt, nexus_section, memories_section, hooks_info]
         self.system_prompt = "\n\n".join([p for p in parts if p])
 
     def _build_commands_prompt(self) -> str:
@@ -379,6 +382,77 @@ class NexusCLI(ModelProvider):
 
         lines.append("\n提示：输入 /help 可以查看更详细的帮助信息。")
         return "\n".join(lines)
+
+    def _build_hooks_prompt(self) -> str:
+        """生成 Hook 系统说明的提示词"""
+        hooks_path = Path.home() / ".nexus" / "hooks.json"
+        trust_marker = Path.home() / ".nexus" / "trusted"
+
+        return f"""
+## Hook 系统 (实验性功能)
+
+Nexus 支持 Hook 机制，允许你在特定事件发生时执行自定义脚本。
+
+### Hook 配置文件
+位置: {hooks_path}
+
+### 支持的事件
+| 事件 | 触发时机 |
+|------|----------|
+| agent_start | Agent 会话开始时 |
+| agent_end | Agent 会话结束时 |
+| iteration_start | 每次迭代开始时 |
+| iteration_end | 每次迭代结束时 |
+| tool_call_start | 工具执行前 |
+| tool_call_end | 工具执行后 |
+| tool_blocked | 工具被阻止时 |
+| context_compressed | 上下文压缩时 |
+| session_start | 用户会话开始时 |
+| session_end | 用户会话结束时 |
+
+### 配置格式
+```json
+{{
+  "hooks": {{
+    "tool_call_start": [
+      {{
+        "id": "bash_guard",
+        "matcher": "bash",
+        "command": "/path/to/check.sh"
+      }}
+    ]
+  }},
+  "trust_all": false
+}}
+```
+
+### 字段说明
+- `matcher`: 工具名过滤器，"*" 表示所有工具
+- `command`: 要执行的命令（支持 shell 脚本）
+- `id`: Hook 的唯一标识符（可选）
+
+### 退出码契约
+- `0`: 继续执行
+- `1`: 阻止操作
+- `2`: 注入消息到上下文
+
+### Hook 环境变量
+执行时提供以下环境变量：
+- `HOOK_EVENT`: 事件名称
+- `HOOK_TOOL_NAME`: 工具名称
+- `HOOK_TOOL_INPUT`: 工具输入参数 (JSON)
+- `HOOK_TOOL_OUTPUT`: 工具输出结果
+- `HOOK_ITERATION`: 当前迭代次数
+- `HOOK_AGENT_ID`: Agent 标识符
+
+### 使用示例
+用户可以让 Agent 帮你配置 hook，例如：
+- "帮我配置一个 bash 工具的 hook，在执行前检查命令是否安全"
+- "添加一个 iteration_start hook，每次迭代开始时打印日志"
+- "配置一个 tool_call_end hook，记录所有工具执行结果"
+
+**安全说明**: Hook 仅在受信任的工作区执行。如需启用，请创建 {trust_marker} 文件。
+"""
 
     def _check_and_reload_skills(self) -> bool:
         """检查 skills 目录是否有变化，如有则重新加载（两层模型）"""

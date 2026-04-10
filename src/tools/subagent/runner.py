@@ -444,4 +444,214 @@ class SubagentRunner:
                 error=str(e),
             )
 
+    async def run_with_inherited_context(
+        self,
+        prompt: str,
+        inherited_messages: list[dict],
+    ) -> SubagentResult:
+        """
+        Run subagent with inherited context from parent agent.
+
+        This is used by agent hooks to allow the subagent to understand
+        the full conversation context before analyzing the hook trigger.
+
+        Args:
+            prompt: The hook prompt to add after inherited messages
+            inherited_messages: List of messages from parent agent context
+
+        Returns:
+            SubagentResult with success/output/error
+        """
+        context = self._create_isolated_context()
+
+        # Add inherited messages first
+        if inherited_messages:
+            for msg in inherited_messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user":
+                    context.add_user_message(content)
+                elif role == "assistant":
+                    context.add_assistant_message(content)
+                elif role == "system":
+                    context.add_system_message(content)
+
+        # Add the hook prompt
+        context.add_user_message(prompt)
+
+        # Continue with the same execution as run()
+        filtered_registry = self._create_filtered_registry()
+        tool_gate = ToolGate()
+        tool_orchestrator = ToolOrchestrator(gate=tool_gate)
+
+        isolated_cwd = self._get_isolated_cwd()
+        tools = filtered_registry.get_tools_schema()
+
+        system_prompt = ""
+        if context.short_term_memory:
+            system_prompt = context.short_term_memory[0].content
+
+        messages = context.get_messages_for_api()
+
+        logger.info(
+            f"[SubagentRunner] 开始执行 (AgentHook模式，继承上下文) | "
+            f"继承消息数={len(inherited_messages)} | max_iterations={context.state.max_iterations}"
+        )
+
+        tool_call_history = []
+        iterations = 0
+
+        async def _check_confirmation(response: str, stop_reason: str) -> Optional[bool]:
+            """Handle completion confirmation check."""
+            nonlocal iterations
+
+            if stop_reason != "stop":
+                return None
+
+            context.add_user_message(
+                "请确认：你是否已完成了上述任务？只需简单回答'已完成'或'未完成'，如果未完成请说明原因。"
+            )
+            confirm_messages = context.get_messages_for_api()
+
+            confirm_result = await self.adapter.chat_with_tools_and_stop_reason(
+                messages=confirm_messages,
+                tools=[],
+                system_prompt=""
+            )
+            confirm_response = confirm_result.text if confirm_result.text else ""
+
+            if "完成" in confirm_response or "已完成" in confirm_response:
+                return True
+            else:
+                if confirm_response:
+                    context.add_assistant_message(f"[系统确认回复]: {confirm_response}")
+                return False
+
+        async def execute_fn():
+            """Execute one iteration."""
+            nonlocal messages, system_prompt, iterations, tool_call_history
+
+            iterations += 1
+
+            # No hooks for agent hook execution to avoid recursion
+            current_tokens = context.calculate_total_tokens()
+            if context.should_compress(current_tokens):
+                success = await self._compress_context_llm(context)
+                if not success:
+                    msgs = context.short_term_memory
+                    system_msgs = [m for m in msgs if m.role == "system"]
+                    recent_msgs = [m for m in msgs if m.role != "system"][-10:]
+                    context.short_term_memory = system_msgs + recent_msgs
+
+            result = await self.adapter.chat_with_tools_and_stop_reason(
+                messages=messages,
+                tools=tools,
+                system_prompt=system_prompt
+            )
+            response = result.text
+            tool_calls = result.tool_calls
+            stop_reason = result.stop_reason
+
+            if not tool_calls:
+                return (response, [], stop_reason)
+
+            context.add_assistant_message(response)
+
+            for tc in tool_calls:
+                tool_name = tc.get("name")
+                tool_args = tc.get("arguments", {})
+                tool_id = tc.get("id", f"tc_{iterations}_{tool_name}")
+
+                # Permission check
+                is_allowed, reason = self._permission_enforcer.is_tool_allowed(tool_name)
+                if not is_allowed:
+                    context.add_tool_message(f"[Blocked] {reason}", tool_name=tool_name)
+                    tool_call_history.append({
+                        "id": tool_id, "name": tool_name, "arguments": tool_args,
+                        "skipped": True, "skip_reason": f"permission_denied: {reason}"
+                    })
+                    continue
+
+                # Skip nested subagent calls
+                if tool_name == "subagent":
+                    context.add_tool_message(
+                        "[警告] 检测到嵌套子代理调用，已被系统阻止。",
+                        tool_name="subagent"
+                    )
+                    tool_call_history.append({
+                        "id": tool_id, "name": tool_name, "arguments": tool_args,
+                        "skipped": True, "skip_reason": "nested_subagent_blocked"
+                    })
+                    continue
+
+                tool_call_history.append({
+                    "id": tool_id, "name": tool_name, "arguments": tool_args,
+                })
+
+                try:
+                    tool_context = ToolContext(
+                        tool_name=tool_name,
+                        args=tool_args,
+                        cwd=isolated_cwd or None,
+                        tracker=None,
+                        gate=tool_gate,
+                        metadata={},
+                    )
+                    result = await tool_orchestrator.execute(
+                        tool=filtered_registry.get(tool_name),
+                        args=tool_args,
+                        context=tool_context,
+                    )
+                    result_str = str(result) if result is not None else ""
+                    from src.context.tool_persister import persist_tool_output
+                    preview = persist_tool_output(tc.get("id", f"tool_{tool_name}"), result_str)
+                    context.add_tool_message(preview, tool_name=tool_name)
+
+                except Exception as e:
+                    context.add_tool_message(f"Error: {str(e)}", tool_name=tool_name)
+
+            messages = context.get_messages_for_api()
+            return (response, tool_calls, stop_reason)
+
+        from src.agent.loop import AgentLoop
+        loop = AgentLoop(
+            context=context,
+            max_iterations=self.config.max_iterations,
+            on_confirmation_check=_check_confirmation,
+        )
+
+        try:
+            final_response = await loop.run(execute_fn)
+            iterations = loop.state.iteration
+            total_tokens = context.calculate_total_tokens()
+
+            return SubagentResult(
+                success=True,
+                output=final_response if final_response else "[无输出]",
+                tool_calls=tool_call_history,
+                iterations=iterations,
+                tokens_used=total_tokens,
+            )
+        except asyncio.TimeoutError:
+            total_tokens = context.calculate_total_tokens()
+            return SubagentResult(
+                success=False,
+                output="",
+                tool_calls=tool_call_history,
+                iterations=iterations,
+                tokens_used=total_tokens,
+                error="Subagent execution timed out",
+            )
+        except Exception as e:
+            logger.error(f"Agent hook subagent failed: {e}")
+            total_tokens = context.calculate_total_tokens()
+            return SubagentResult(
+                success=False,
+                output="",
+                tool_calls=tool_call_history,
+                iterations=iterations,
+                tokens_used=total_tokens,
+                error=str(e),
+            )
+
 __all__ = ["SubagentRunner"]

@@ -48,6 +48,7 @@ docs/
 
 # Trae
 .trae/
+.claude/
 
 # User data and tasks (这些是运行时生成的，不需要提交)
 .nexus/

@@ -1,8 +1,11 @@
 """Tool orchestrator for managing tool execution lifecycle."""
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from .context import ToolContext, ToolGate
 from .registry import Tool
+
+if TYPE_CHECKING:
+    from src.hooks import HookRunner
 
 
 class ToolOrchestrator:
@@ -18,13 +21,15 @@ class ToolOrchestrator:
         result = await orchestrator.execute(tool, args, context)
     """
 
-    def __init__(self, gate: ToolGate):
+    def __init__(self, gate: ToolGate, hook_runner: Optional["HookRunner"] = None):
         """Initialize the orchestrator with a gate.
 
         Args:
             gate: The gate used to control mutating operations
+            hook_runner: Optional HookRunner for pre/post tool hooks
         """
         self._gate = gate
+        self._hook_runner = hook_runner
 
     async def execute(
         self,
@@ -35,12 +40,13 @@ class ToolOrchestrator:
         """Execute a tool with full lifecycle management.
 
         This method orchestrates the complete tool execution flow:
+        0. Run tool_call_start hooks (before gate acquisition)
         1. Calls tool.before_execute() for pre-execution setup
         2. If tool.is_mutating, acquires the gate lock via context.gate.wait()
         3. Calls tool.execute() to perform the actual operation
         4. Calls tool.after_execute(result) for post-execution cleanup
-        5. If tool.is_mutating, releases the gate lock via context.gate.release()
-        6. Returns the execution result
+        5. Run tool_call_end hooks
+        6. Releases gate lock if acquired (in finally block)
 
         Args:
             tool: The tool instance to execute
@@ -69,6 +75,14 @@ class ToolOrchestrator:
         gate_acquired = False
 
         try:
+            # Step 0: Run tool_call_start hooks (before gate acquisition)
+            if self._hook_runner:
+                hook_result = await self._hook_runner.run_pre_tool(tool.name, args)
+                if hook_result.blocked:
+                    raise PermissionError(f"Tool '{tool.name}' blocked by hook")
+                if hook_result.updated_input:
+                    args = hook_result.updated_input
+
             # Step 1: Pre-execution hook
             if hasattr(tool, "before_execute"):
                 await tool.before_execute(context=context)
@@ -86,12 +100,19 @@ class ToolOrchestrator:
             if hasattr(tool, "after_execute"):
                 await tool.after_execute(result, context=context)
 
+            # Step 5: Run tool_call_end hooks
+            if self._hook_runner:
+                result_str = str(result) if result is not None else ""
+                hook_result = await self._hook_runner.run_post_tool(
+                    tool.name, args, result_str
+                )
+                # Hook messages are not used here since we already have the result
+
         finally:
-            # Step 5: Release gate if it was acquired
+            # Gate release (runs after hooks complete)
             if gate_acquired and context.gate is not None:
                 await context.gate.release()
 
-        # Step 6: Return the result
         return result
 
     @property
