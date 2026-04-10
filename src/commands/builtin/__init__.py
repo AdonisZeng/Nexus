@@ -6,6 +6,7 @@ from .help import help_command, HelpCommand
 from .mcpstatus import mcpstatus_command, McpStatusCommand
 from .models import models_command, ModelsCommand
 from .plan import plan_command
+from .prompt_cmd import prompt_command, PromptCommand
 from .reload import reload_command, ReloadCommand
 from .restore import restore_command
 from .sessions import sessions_command
@@ -35,4 +36,6 @@ __all__ = [
     "tasks_command",
     "teams_command",
     "TeamsCommand",
+    "prompt_command",
+    "PromptCommand",
 ]

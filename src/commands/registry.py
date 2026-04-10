@@ -50,6 +50,7 @@ class CommandRegistry:
             agents_command,
             tasks_command,
             teams_command,
+            prompt_command,
         )
         self.register(help_command)
         self.register(plan_command)
@@ -64,6 +65,7 @@ class CommandRegistry:
         self.register(agents_command)
         self.register(tasks_command)
         self.register(teams_command)
+        self.register(prompt_command)
 
     def get(self, name: str) -> Optional[Command]:
         """

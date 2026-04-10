@@ -49,6 +49,12 @@ from .micro_compactor import (
     get_compactor,
 )
 from .consolidator import MemoryConsolidator, get_consolidator
+from .system_prompt import (
+    SystemPromptBuilder,
+    SystemPromptConfig,
+    DYNAMIC_BOUNDARY,
+    build_system_reminder,
+)
 
 __all__ = [
     "ContextMessage",
@@ -85,4 +91,9 @@ __all__ = [
     # Consolidation
     "MemoryConsolidator",
     "get_consolidator",
+    # System Prompt
+    "SystemPromptBuilder",
+    "SystemPromptConfig",
+    "DYNAMIC_BOUNDARY",
+    "build_system_reminder",
 ]
