@@ -12,7 +12,7 @@ from src.utils import get_logger
 
 from .models import SubagentConfig, SubagentResult
 from .hooks import HookRunner
-from .permission import PermissionEnforcer
+from src.permissions import PermissionChecker, PermissionMode, create_ask_user_callback
 from .parameter_validator import ToolParameterValidator
 
 logger = get_logger("subagent.runner")
@@ -31,9 +31,15 @@ class SubagentRunner:
         self.adapter = adapter
         self.tool_registry = tool_registry
         self._filtered_registry: Optional[ToolRegistry] = None
-        self._permission_enforcer: PermissionEnforcer = PermissionEnforcer(
-            config.permission_mode,
-            tool_registry=tool_registry
+        # Initialize ask user callback for ASK mode
+        ask_callback = None
+        if config.permission_mode == "ask":
+            ask_callback = create_ask_user_callback()
+
+        self._permission_checker: PermissionChecker = PermissionChecker(
+            mode=PermissionMode.from_string(config.permission_mode),
+            tool_registry=tool_registry,
+            ask_user_callback=ask_callback,
         )
         # Initialize hook runner once
         if config.hooks:
@@ -137,7 +143,11 @@ class SubagentRunner:
         # Create filtered tool registry
         filtered_registry = self._create_filtered_registry()
         tool_gate = ToolGate()
-        tool_orchestrator = ToolOrchestrator(gate=tool_gate)
+        tool_orchestrator = ToolOrchestrator(
+            gate=tool_gate,
+            permission_checker=self._permission_checker,
+            ask_user_callback=self._permission_checker.ask_user_callback,
+        )
 
         # Get isolated cwd for tool execution
         isolated_cwd = self._get_isolated_cwd()
@@ -285,23 +295,6 @@ class SubagentRunner:
                         tool_args = hook_result.updated_input
                         tc["arguments"] = tool_args
 
-                # Check permission mode
-                is_allowed, reason = self._permission_enforcer.is_tool_allowed(tool_name)
-                if not is_allowed:
-                    logger.info(f"[SubagentRunner] Tool {tool_name} blocked by permission mode: {reason}")
-                    context.add_tool_message(
-                        f"[Blocked] {reason}",
-                        tool_name=tool_name
-                    )
-                    tool_call_history.append({
-                        "id": tool_id,
-                        "name": tool_name,
-                        "arguments": tool_args,
-                        "skipped": True,
-                        "skip_reason": f"permission_denied: {reason}"
-                    })
-                    continue
-
                 # Validate tool parameters
                 if self._param_validator:
                     is_valid, error = self._param_validator.validate(tool_name, tool_args)
@@ -372,6 +365,18 @@ class SubagentRunner:
                         hook_result = await self._hook_runner.run_post_tool(tool_name, tool_args, result_str)
                         for msg in hook_result.messages:
                             context.add_tool_message(f"[Hook note]: {msg}", tool_name=tool_name)
+
+                except PermissionError as e:
+                    # Permission blocked - record as skipped
+                    logger.info(f"[SubagentRunner] Tool {tool_name} blocked by permission: {e}")
+                    context.add_tool_message(f"[Blocked] {e}", tool_name=tool_name)
+                    tool_call_history.append({
+                        "id": tool_id,
+                        "name": tool_name,
+                        "arguments": tool_args,
+                        "skipped": True,
+                        "skip_reason": f"permission_denied: {e}"
+                    })
 
                 except Exception as e:
                     error_msg = f"Error: {str(e)}"
@@ -482,7 +487,11 @@ class SubagentRunner:
         # Continue with the same execution as run()
         filtered_registry = self._create_filtered_registry()
         tool_gate = ToolGate()
-        tool_orchestrator = ToolOrchestrator(gate=tool_gate)
+        tool_orchestrator = ToolOrchestrator(
+            gate=tool_gate,
+            permission_checker=self._permission_checker,
+            ask_user_callback=self._permission_checker.ask_user_callback,
+        )
 
         isolated_cwd = self._get_isolated_cwd()
         tools = filtered_registry.get_tools_schema()
@@ -562,16 +571,6 @@ class SubagentRunner:
                 tool_args = tc.get("arguments", {})
                 tool_id = tc.get("id", f"tc_{iterations}_{tool_name}")
 
-                # Permission check
-                is_allowed, reason = self._permission_enforcer.is_tool_allowed(tool_name)
-                if not is_allowed:
-                    context.add_tool_message(f"[Blocked] {reason}", tool_name=tool_name)
-                    tool_call_history.append({
-                        "id": tool_id, "name": tool_name, "arguments": tool_args,
-                        "skipped": True, "skip_reason": f"permission_denied: {reason}"
-                    })
-                    continue
-
                 # Skip nested subagent calls
                 if tool_name == "subagent":
                     context.add_tool_message(
@@ -606,6 +605,14 @@ class SubagentRunner:
                     from src.context.tool_persister import persist_tool_output
                     preview = persist_tool_output(tc.get("id", f"tool_{tool_name}"), result_str)
                     context.add_tool_message(preview, tool_name=tool_name)
+
+                except PermissionError as e:
+                    # Permission blocked - record as skipped
+                    context.add_tool_message(f"[Blocked] {e}", tool_name=tool_name)
+                    tool_call_history.append({
+                        "id": tool_id, "name": tool_name, "arguments": tool_args,
+                        "skipped": True, "skip_reason": f"permission_denied: {e}"
+                    })
 
                 except Exception as e:
                     context.add_tool_message(f"Error: {str(e)}", tool_name=tool_name)

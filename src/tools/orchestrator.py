@@ -1,8 +1,12 @@
 """Tool orchestrator for managing tool execution lifecycle."""
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 
 from .context import ToolContext, ToolGate
 from .registry import Tool
+from src.permissions import PermissionChecker
+
+# Type alias for ask user callback
+AskUserCallback = Callable[[str, dict], Awaitable[bool]]
 
 if TYPE_CHECKING:
     from src.hooks import HookRunner
@@ -13,7 +17,7 @@ class ToolOrchestrator:
 
     The orchestrator manages the complete execution flow of tools,
     including pre-execution hooks, gate management for mutating operations,
-    and post-execution cleanup.
+    permission checking, and post-execution cleanup.
 
     Example:
         gate = ToolGate()
@@ -21,15 +25,25 @@ class ToolOrchestrator:
         result = await orchestrator.execute(tool, args, context)
     """
 
-    def __init__(self, gate: ToolGate, hook_runner: Optional["HookRunner"] = None):
+    def __init__(
+        self,
+        gate: ToolGate,
+        permission_checker: Optional[PermissionChecker] = None,
+        hook_runner: Optional["HookRunner"] = None,
+        ask_user_callback: Optional[AskUserCallback] = None,
+    ):
         """Initialize the orchestrator with a gate.
 
         Args:
             gate: The gate used to control mutating operations
+            permission_checker: Optional PermissionChecker for permission enforcement
             hook_runner: Optional HookRunner for pre/post tool hooks
+            ask_user_callback: Optional async callback for ASK mode user confirmation
         """
         self._gate = gate
+        self._permission_checker = permission_checker
         self._hook_runner = hook_runner
+        self._ask_user_callback = ask_user_callback
 
     async def execute(
         self,
@@ -42,6 +56,7 @@ class ToolOrchestrator:
         This method orchestrates the complete tool execution flow:
         0. Run tool_call_start hooks (before gate acquisition)
         1. Calls tool.before_execute() for pre-execution setup
+        1.5. Permission check (if permission_checker is set)
         2. If tool.is_mutating, acquires the gate lock via context.gate.wait()
         3. Calls tool.execute() to perform the actual operation
         4. Calls tool.after_execute(result) for post-execution cleanup
@@ -86,6 +101,18 @@ class ToolOrchestrator:
             # Step 1: Pre-execution hook
             if hasattr(tool, "before_execute"):
                 await tool.before_execute(context=context)
+
+            # Step 1.5: Permission check (before gate acquisition)
+            if self._permission_checker:
+                perm_result = self._permission_checker.check_with_tool(tool)
+                if not perm_result.allowed:
+                    if perm_result.needs_confirmation and self._ask_user_callback:
+                        # ASK mode: await user confirmation
+                        confirmed = await self._ask_user_callback(tool.name, args)
+                        if not confirmed:
+                            raise PermissionError(f"Tool '{tool.name}' blocked by user")
+                    else:
+                        raise PermissionError(f"Tool '{tool.name}' blocked: {perm_result.reason}")
 
             # Step 2: Check if tool is mutating and acquire gate if needed
             is_mutating = getattr(tool, "is_mutating", False)
