@@ -301,6 +301,211 @@ class LLMContextCompressor:
             return False
 
 
+class UnifiedContextCompressor:
+    """Unified context compressor - Tier 3 coordination layer.
+
+    Coordinates all three compression tiers:
+      1. Tool output persistence  (ToolOutputPersister)
+      2. Micro-compaction          (MicroCompactor)
+      3. LLM summarization         (LLMContextCompressor)
+
+    Also handles transcript persistence before compression as a safety net.
+    """
+
+    DEFAULT_TRANSCRIPT_DIR = Path.home() / ".nexus" / "transcripts"
+
+    def __init__(
+        self,
+        target_tokens: int = 100000,
+        model_adapter=None,
+        persister=None,
+        compactor=None,
+    ):
+        self.target_tokens = target_tokens
+        self.model_adapter = model_adapter
+        self._persister = persister
+        self._compactor = compactor
+        self.transcript_dir = self.DEFAULT_TRANSCRIPT_DIR
+
+    @property
+    def persister(self):
+        if self._persister is None:
+            from .tool_persister import get_persister
+            self._persister = get_persister()
+        return self._persister
+
+    @property
+    def compactor(self):
+        if self._compactor is None:
+            from .micro_compactor import get_compactor
+            self._compactor = get_compactor()
+        return self._compactor
+
+    def compress(
+        self,
+        context_or_messages,
+        *,
+        persist_large_outputs: bool = True,
+        enable_micro_compact: bool = True,
+        persist_transcript: bool = True,
+        enable_llm_summarize: bool = True,
+        keep_recent_micro: int = 3,
+        large_output_threshold: int = 20000,
+    ) -> bool:
+        """Compress context using tiered approach.
+
+        Args:
+            context_or_messages: AgentContext or message list (list[dict] or list[ContextMessage])
+            persist_large_outputs: Tier-1: persist large tool outputs to disk
+            enable_micro_compact:   Tier-2: micro-compact older tool results
+            persist_transcript:     Write full transcript to disk before compression
+            enable_llm_summarize:  Tier-3: LLM summarization
+            keep_recent_micro:      Recent N tool results to keep intact (Tier-2)
+            large_output_threshold: Chars > this trigger persistence (Tier-1)
+
+        Returns:
+            True if any compression was performed
+        """
+        # Detect format and extract messages
+        if hasattr(context_or_messages, "short_term_memory"):
+            # AgentContext
+            messages = context_or_messages.short_term_memory
+            is_agent_context = True
+        else:
+            messages = context_or_messages
+            is_agent_context = False
+
+        if not messages:
+            return False
+
+        # Detect message adapter
+        first_msg = messages[0] if messages else None
+        if isinstance(first_msg, dict):
+            from .micro_compactor import DictMessageAdapter as MsgAdapter
+        else:
+            from .micro_compactor import ContextMessageAdapter as MsgAdapter
+        adapter = MsgAdapter()
+
+        # ── Tier-1: Persist large tool outputs ──────────────────────────
+        if persist_large_outputs:
+            self._persist_large_tool_outputs(messages, adapter, large_output_threshold)
+
+        # ── Tier-2: Micro-compact older tool results ────────────────────
+        if enable_micro_compact:
+            self.compactor.compact(messages, adapter)
+
+        # ── Check if Tier-3 is needed ──────────────────────────────────
+        total_tokens = self._calculate_tokens(messages)
+        if total_tokens <= self.target_tokens:
+            return False
+
+        # ── Tier-3: LLM summarization ──────────────────────────────────
+        if enable_llm_summarize:
+            # Write transcript first (safety net)
+            if persist_transcript:
+                self._write_transcript(messages)
+
+            # Run LLM summarization
+            return self._llm_summarize(context_or_messages, is_agent_context)
+
+        return False
+
+    def _persist_large_tool_outputs(self, messages, adapter, threshold: int) -> None:
+        """Persist large tool outputs (Tier-1)."""
+        for msg in messages:
+            if not adapter.is_tool_result(msg):
+                continue
+
+            content = adapter.get_content(msg)
+            if len(content) <= threshold:
+                continue
+
+            # Get tool_use_id from metadata
+            tool_use_id = "unknown"
+            if hasattr(msg, "metadata"):
+                tool_use_id = msg.metadata.get("tool_call_id", tool_use_id)
+            elif isinstance(msg, dict):
+                tool_use_id = msg.get("tool_call_id", tool_use_id)
+
+            result = self.persister.persist(tool_use_id, content)
+            if result.was_persisted:
+                adapter.set_content(msg, result.preview)
+
+    def _write_transcript(self, messages) -> Path:
+        """Write transcript before compression (safety net)."""
+        import json
+
+        self.transcript_dir.mkdir(parents=True, exist_ok=True)
+        path = self.transcript_dir / f"transcript_{int(time.time())}.jsonl"
+
+        with open(path, "w", encoding="utf-8") as f:
+            for msg in messages:
+                if hasattr(msg, "to_dict"):
+                    f.write(json.dumps(msg.to_dict(), default=str) + "\n")
+                elif hasattr(msg, "__dict__"):
+                    f.write(json.dumps(msg.__dict__, default=str) + "\n")
+                else:
+                    f.write(json.dumps(msg, default=str) + "\n")
+
+        return path
+
+    def _calculate_tokens(self, messages) -> int:
+        """Calculate total tokens for messages."""
+        if not messages:
+            return 0
+
+        if isinstance(messages[0], dict):
+            from src.utils.tokenizer import count_messages_tokens
+            return count_messages_tokens(messages)
+        else:
+            # ContextMessage list
+            total = 0
+            for m in messages:
+                tokens = getattr(m, "token_count", 0)
+                if tokens == 0 and hasattr(m, "content"):
+                    from src.utils.tokenizer import count_tokens
+                    tokens = count_tokens(m.content)
+                total += tokens
+            return total
+
+    def _llm_summarize(self, context_or_messages, is_agent_context: bool) -> bool:
+        """Perform LLM summarization (Tier-3)."""
+        if self.model_adapter is None:
+            return False
+
+        if is_agent_context:
+            return LLMContextCompressor.compress_context(
+                context_or_messages, self.model_adapter
+            )
+        else:
+            result = LLMContextCompressor.compress_messages(
+                context_or_messages, self.model_adapter
+            )
+            if result is not None:
+                # Replace messages in place
+                context_or_messages[:] = result
+                return True
+            return False
+
+
+# Singleton instance
+_unified_compressor: Optional["UnifiedContextCompressor"] = None
+
+
+def get_unified_compressor(
+    target_tokens: int = 100000,
+    model_adapter=None,
+) -> UnifiedContextCompressor:
+    """Get or create the default UnifiedContextCompressor instance."""
+    global _unified_compressor
+    if _unified_compressor is None:
+        _unified_compressor = UnifiedContextCompressor(
+            target_tokens=target_tokens,
+            model_adapter=model_adapter,
+        )
+    return _unified_compressor
+
+
 class SessionPersistence:
     """Save and load session state."""
 

@@ -325,6 +325,10 @@ class AgentSession(ModelProvider):
 
         # Context compression check
         if len(self.messages) > 2:
+            # Tier-2: micro-compact older tool results before threshold check
+            from src.context.micro_compactor import micro_compact_messages
+            micro_compact_messages(self.messages, keep_recent=3)
+
             from src.agent.context import AgentContext
             temp_context = AgentContext()
             total_tokens = temp_context.calculate_total_tokens(self.messages)
@@ -435,9 +439,15 @@ class AgentSession(ModelProvider):
                             metadata={"tool_name": tool_name}
                         )
 
+                    # Tier-1: persist large tool outputs to disk, keep preview
+                    from src.context.tool_persister import persist_tool_output
+                    preview = persist_tool_output(
+                        tool_call.get("id", f"tool_{tool_name}"),
+                        str(result)
+                    )
                     self.messages.append({
                         "role": "tool",
-                        "content": str(result),
+                        "content": preview,
                         "tool_call_id": tool_call.get("id"),
                     })
 

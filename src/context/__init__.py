@@ -26,6 +26,8 @@ from .core import (
     SkillMetadata,
     ContextCompressor,
     LLMContextCompressor,
+    UnifiedContextCompressor,
+    get_unified_compressor,
     SessionPersistence,
     SessionSummary,
     MemoryManager,
@@ -33,6 +35,19 @@ from .core import (
 )
 from .nexus_md import NexusMDLoader, NexusMD, NexusMDMetadata
 from .auto_memory import AutoMemoryManager, MemoryEntry
+from .tool_persister import (
+    ToolOutputPersister,
+    PersistedOutput,
+    PersistConfig,
+    persist_tool_output,
+    get_persister,
+)
+from .micro_compactor import (
+    MicroCompactor,
+    MicroCompactConfig,
+    micro_compact_messages,
+    get_compactor,
+)
 
 __all__ = [
     "ContextMessage",
@@ -42,16 +57,28 @@ __all__ = [
     "SkillMetadata",
     "ContextCompressor",
     "LLMContextCompressor",
+    "UnifiedContextCompressor",
+    "get_unified_compressor",
     "SessionPersistence",
     "SessionSummary",
     "MemoryManager",
     "get_user_memory_dir",
     "create_context",
     "from_messages_list",
-    # New for Phase 1
     "NexusMDLoader",
     "NexusMD",
     "NexusMDMetadata",
     "AutoMemoryManager",
     "MemoryEntry",
+    # Tier-1
+    "ToolOutputPersister",
+    "PersistedOutput",
+    "PersistConfig",
+    "persist_tool_output",
+    "get_persister",
+    # Tier-2
+    "MicroCompactor",
+    "MicroCompactConfig",
+    "micro_compact_messages",
+    "get_compactor",
 ]

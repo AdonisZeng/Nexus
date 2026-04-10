@@ -374,6 +374,10 @@ class AgentLoop:
         Returns:
             True if compression was performed
         """
+        # Tier-2: micro-compact older tool results before threshold check
+        from src.context.micro_compactor import micro_compact_messages
+        micro_compact_messages(self.context.short_term_memory, keep_recent=3)
+
         current_length = self.calculate_context_length()
 
         if current_length > self.context_threshold:

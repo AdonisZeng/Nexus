@@ -156,10 +156,72 @@ def truncate_text(text: str, max_tokens: int, model: str = "cl100k_base") -> str
     return encoding.decode(truncated_tokens)
 
 
+def ensure_token_count(
+    messages: list,
+    model: str = "cl100k_base"
+) -> int:
+    """
+    Recalculate and ensure token_count is set for all messages.
+
+    This fixes the issue where ContextMessage.token_count is often 0
+    because add_message() doesn't require it.
+
+    Args:
+        messages: Message list to process (list[dict] or list[ContextMessage])
+        model: Encoding model name
+
+    Returns:
+        Total token count for all messages
+    """
+    total = 0
+
+    for msg in messages:
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+            tokens = count_tokens(content, model)
+            total += tokens
+        else:
+            # ContextMessage or similar dataclass
+            if hasattr(msg, "token_count") and msg.token_count == 0 and hasattr(msg, "content"):
+                msg.token_count = count_tokens(msg.content, model)
+            total += getattr(msg, "token_count", 0)
+
+    return total
+
+
+def recalculate_message_tokens(
+    messages: list,
+    model: str = "cl100k_base"
+) -> int:
+    """
+    Recalculate token counts for all messages and update in place.
+
+    Returns:
+        Total token count after recalculation
+    """
+    total = 0
+
+    for msg in messages:
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+            tokens = count_tokens(content, model)
+            msg["token_count"] = tokens  # Add token_count to dict if missing
+            total += tokens
+        elif hasattr(msg, "token_count"):
+            # ContextMessage
+            content = getattr(msg, "content", "")
+            msg.token_count = count_tokens(content, model)
+            total += msg.token_count
+
+    return total
+
+
 __all__ = [
     "get_encoding",
     "count_tokens",
     "count_messages_tokens",
     "estimate_tokens",
     "truncate_text",
+    "ensure_token_count",
+    "recalculate_message_tokens",
 ]

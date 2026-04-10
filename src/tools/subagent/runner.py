@@ -161,6 +161,10 @@ class SubagentRunner:
             iterations += 1
 
             # Context compression check
+            # Tier-2: micro-compact older tool results before threshold check
+            from src.context.micro_compactor import micro_compact_messages
+            micro_compact_messages(context.short_term_memory, keep_recent=3)
+
             current_tokens = context.calculate_total_tokens()
             if context.should_compress(current_tokens):
                 logger.warning(f"[SubagentRunner] 上下文超过70%阈值 ({current_tokens} tokens)，开始压缩")
@@ -248,8 +252,11 @@ class SubagentRunner:
                         context=tool_context,
                     )
                     result_str = str(result) if result is not None else ""
+                    # Tier-1: persist large tool outputs to disk, keep preview
+                    from src.context.tool_persister import persist_tool_output
+                    preview = persist_tool_output(tc.get("id", f"tool_{tool_name}"), result_str)
                     logger.info(f"[SubagentRunner] 工具 {tool_name} 执行完成")
-                    context.add_tool_message(result_str, tool_name=tool_name)
+                    context.add_tool_message(preview, tool_name=tool_name)
                 except Exception as e:
                     error_msg = f"Error: {str(e)}"
                     logger.error(f"[SubagentRunner] 工具 {tool_name} 执行失败: {e}")
