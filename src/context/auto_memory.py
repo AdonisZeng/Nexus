@@ -1,31 +1,5 @@
 """
-Auto Memory Manager - AI-powered selective memory storage
-
-Instead of dumping entire sessions, this system uses an LLM to decide
-what information is worth remembering for the long term.
-
-Directory structure:
-~/.nexus/memory/
-├── sessions/           # Full session dumps (existing)
-├── entries/            # Worthy memory entries (new)
-│   └── {timestamp}_{hash}.md
-└── memory.md           # Pointer/index file (new)
-
-Memory Entry format:
----
-type: decision
-category: architecture
-created: 2026-04-07T10:30:00
-session_id: abc123
-tags: [api-design, rest]
-summary: Event-driven communication pattern
----
-
-# Summary
-Content...
-"""
-
-import re
+Auto Memory Manager - AI-powered selective memory storage"""
 import hashlib
 import logging
 from pathlib import Path
@@ -35,14 +9,10 @@ from typing import Optional
 
 import yaml
 
+from src.utils.frontmatter import parse_frontmatter
+
 
 logger = logging.getLogger("Nexus")
-
-
-FRONTMATTER_PATTERN = re.compile(
-    r"^---\s*\n(.*?)\n---\s*\n(.*)$",
-    re.DOTALL | re.MULTILINE
-)
 
 
 # Memory entry type definitions
@@ -304,23 +274,14 @@ NONE
     def _parse_entry_file(self, file_path: Path) -> Optional[MemoryEntry]:
         """Parse a memory entry file."""
         try:
-            content = file_path.read_text(encoding="utf-8")
-            match = FRONTMATTER_PATTERN.match(content)
-
-            if not match:
+            frontmatter, docstring = parse_frontmatter(file_path.read_text(encoding="utf-8"))
+            if not frontmatter:
                 return None
 
-            frontmatter = yaml.safe_load(match.group(1)) or {}
-            docstring = match.group(2).strip()
-
-            # Extract title from docstring (first # heading)
             summary = frontmatter.get("summary", "")
             if not summary and docstring:
                 first_line = docstring.split("\n")[0] if docstring else ""
-                if first_line.startswith("# "):
-                    summary = first_line[2:].strip()
-                else:
-                    summary = docstring[:80]
+                summary = first_line[2:].strip() if first_line.startswith("# ") else docstring[:80]
 
             return MemoryEntry(
                 entry_type=frontmatter.get("type", "fact"),

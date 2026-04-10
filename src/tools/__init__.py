@@ -4,6 +4,7 @@ from .file import FileReadTool, FileWriteTool, FileSearchTool
 from .shell import ShellTool
 from .code import CodeExecTool
 from .subagent import SubagentTool, SubagentRegistry
+from .skill_tool import LoadSkillTool
 from src.team.tools import TeamTool
 
 __all__ = [
@@ -19,7 +20,7 @@ __all__ = [
     "SubagentTool",
     "SubagentRegistry",
     "TeamTool",
+    "LoadSkillTool",
 ]
 
-# Re-export the single authoritative instance from registry (avoid double-instantiation)
 from .registry import global_registry

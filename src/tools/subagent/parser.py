@@ -1,42 +1,18 @@
 """Subagent configuration file parser"""
-import re
-import yaml
 from pathlib import Path
 from typing import Tuple
 
 from .models import SubagentConfig
+from src.utils.frontmatter import parse_frontmatter
 
 
 class SubagentParser:
     """Parse subagent .md configuration files with YAML frontmatter"""
 
-    FRONTMATTER_PATTERN = re.compile(
-        r"^---\s*\n(.*?)\n---\s*\n(.*)$",
-        re.DOTALL | re.MULTILINE
-    )
-
     @classmethod
     def parse(cls, file_path: Path) -> Tuple[dict, str]:
-        """
-        Parse a subagent .md file.
-        Returns (frontmatter_dict, system_prompt_content)
-        """
-        content = file_path.read_text(encoding="utf-8")
-        match = cls.FRONTMATTER_PATTERN.match(content)
-
-        if match:
-            frontmatter_str = match.group(1)
-            system_prompt = match.group(2).strip()
-            try:
-                frontmatter = yaml.safe_load(frontmatter_str) or {}
-                return frontmatter, system_prompt
-            except yaml.YAMLError as e:
-                from src.utils import get_logger
-                logger = get_logger("subagent.parser")
-                logger.warning(f"Failed to parse YAML in {file_path}: {e}")
-                return {}, content.strip()
-
-        return {}, content.strip()
+        """Parse a subagent .md file. Returns (frontmatter_dict, system_prompt_content)"""
+        return parse_frontmatter(file_path.read_text(encoding="utf-8"))
 
     @classmethod
     def to_config(cls, file_path: Path) -> SubagentConfig:

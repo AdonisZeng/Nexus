@@ -1,24 +1,14 @@
-"""Skill loader - scan directories and parse SKILL.md files"""
-
-import re
-import yaml
-import importlib.util
-import os
+"""Scan directories and parse SKILL.md files."""
+from functools import lru_cache
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any, AsyncIterator
+from typing import Optional
 from logging import getLogger
 
+from .scope import SkillScope, get_skill_roots, get_user_skills_dir
+from src.utils.frontmatter import parse_frontmatter
+
 logger = getLogger(__name__)
-
-
-def get_user_skills_dir() -> Path:
-    """Get the user skills directory (~/.nexus/skills)"""
-    user_dir = Path(os.path.expanduser("~"))
-    nexus_skills = user_dir / ".nexus" / "skills"
-    # Auto-create if not exists
-    nexus_skills.mkdir(parents=True, exist_ok=True)
-    return nexus_skills
 
 
 @dataclass
@@ -34,40 +24,13 @@ class SkillMetadata:
     file_path: Optional[Path] = None
 
 
-@dataclass
-class LoadedSkill(SkillMetadata):
-    """Fully loaded skill with handler"""
-    handler: Optional[Callable[..., AsyncIterator[Any]]] = None
-
-
 class SKILLParser:
     """Parse SKILL.md files with YAML frontmatter"""
 
-    FRONTMATTER_PATTERN = re.compile(
-        r"^---\s*\n(.*?)\n---\s*\n(.*)$",
-        re.DOTALL | re.MULTILINE
-    )
-
     @classmethod
     def parse(cls, file_path: Path) -> tuple[dict, str]:
-        """
-        Parse a SKILL.md file.
-        Returns (frontmatter_dict, content_str)
-        """
-        content = file_path.read_text(encoding="utf-8")
-
-        match = cls.FRONTMATTER_PATTERN.match(content)
-        if match:
-            frontmatter_str = match.group(1)
-            docstring = match.group(2).strip()
-            try:
-                frontmatter = yaml.safe_load(frontmatter_str) or {}
-                return frontmatter, docstring
-            except yaml.YAMLError as e:
-                logger.warning(f"Failed to parse YAML in {file_path}: {e}")
-                return {}, content.strip()
-
-        return {}, content.strip()
+        """Parse a SKILL.md file. Returns (frontmatter_dict, content_str)"""
+        return parse_frontmatter(file_path.read_text(encoding="utf-8"))
 
     @classmethod
     def to_skill_metadata(cls, file_path: Path) -> SkillMetadata:
@@ -86,53 +49,11 @@ class SKILLParser:
         )
 
 
-class ModuleLoader:
-    """Dynamically load Python modules from skill directories"""
-
-    @classmethod
-    def load_module(cls, directory: Path, module_name: str = "skill"):
-        """
-        Load a Python module from a directory.
-        Looks for __init__.py or {module_name}.py
-        """
-        # Try __init__.py first
-        init_file = directory / "__init__.py"
-        if init_file.exists():
-            return cls._load_file(init_file)
-
-        # Try module_name.py
-        module_file = directory / f"{module_name}.py"
-        if module_file.exists():
-            return cls._load_file(module_file)
-
-        # Try any .py file
-        py_files = list(directory.glob("*.py"))
-        if py_files:
-            return cls._load_file(py_files[0])
-
-        return None
-
-    @classmethod
-    def _load_file(cls, file_path: Path):
-        """Load a specific Python file"""
-        module_name = f"skill.{file_path.parent.name}.{file_path.stem}"
-
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        if spec and spec.loader:
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
-
-        return None
-
-
 class SkillLoader:
-    """Scan directories and load skills"""
+    """Scan directories and load skills (pure Markdown, no Python handlers)"""
 
     def __init__(self, skills_dir: Optional[Path] = None):
         self.skills_dir = skills_dir or Path(__file__).parent
-        self.parser = SKILLParser()
-        self.module_loader = ModuleLoader()
 
     def scan_directory(self, directory: Path) -> list[Path]:
         """Scan a directory for skill subdirectories with SKILL.md"""
@@ -149,61 +70,20 @@ class SkillLoader:
 
         return skill_paths
 
-    def load_skill(self, skill_md_path: Path) -> Optional[LoadedSkill]:
-        """Load a single skill from its SKILL.md file"""
+    def load_skill(self, skill_md_path: Path) -> Optional[SkillMetadata]:
+        """Load a single skill's metadata from its SKILL.md file"""
         try:
-            metadata = self.parser.to_skill_metadata(skill_md_path)
-            skill_dir = skill_md_path.parent
-
-            # Load the Python module
-            module = self.module_loader.load_module(skill_dir)
-            handler = None
-
-            if module:
-                # Look for skill handler
-                # Try {name}_handler first
-                handler_name = f"{metadata.name}_handler"
-                if hasattr(module, handler_name):
-                    handler = getattr(module, handler_name)
-                # Try handler attribute
-                elif hasattr(module, "handler"):
-                    handler = getattr(module, "handler")
-                # Try {name}_skill and get its handler
-                skill_obj_name = f"{metadata.name}_skill"
-                if hasattr(module, skill_obj_name):
-                    skill_obj = getattr(module, skill_obj_name)
-                    if hasattr(skill_obj, "handler"):
-                        handler = skill_obj.handler
-
-            return LoadedSkill(
-                name=metadata.name,
-                description=metadata.description,
-                triggers=metadata.triggers,
-                aliases=metadata.aliases,
-                license=metadata.license,
-                requires_args=metadata.requires_args,
-                docstring=metadata.docstring,
-                file_path=metadata.file_path,
-                handler=handler,
-            )
-
+            return SKILLParser.to_skill_metadata(skill_md_path)
         except Exception as e:
             logger.error(f"Failed to load skill from {skill_md_path}: {e}")
             return None
 
-    def load_all(self, directories: Optional[list[Path]] = None) -> list[LoadedSkill]:
-        """Load all skills from given directories"""
-        if directories is None:
-            directories = [
-                self.skills_dir / "builtin",
-                self.skills_dir / "custom",
-                get_user_skills_dir(),  # ~/.nexus/skills
-            ]
-
+    def load_all(self) -> list[SkillMetadata]:
+        """Load all skills' metadata from configured directories"""
         skills = []
         seen_names = set()
 
-        for directory in directories:
+        for scope, directory in self._get_skill_directories():
             if not directory.exists():
                 continue
 
@@ -215,34 +95,78 @@ class SkillLoader:
 
         return skills
 
-    def discover_skills(self, base_dir: Optional[Path] = None) -> list[SkillMetadata]:
-        """Discover all skills without loading their handlers"""
-        base_dir = base_dir or self.skills_dir
-        metadata_list = []
+    def _get_skill_directories(self) -> list[tuple[SkillScope, Path]]:
+        """Get all skill source directories from configured scopes"""
+        roots = get_skill_roots()
+        result = []
+        for scope, path in roots:
+            if scope == SkillScope.SYSTEM:
+                continue  # system scope is internal, not exposed to users
+            result.append((scope, path))
+        return result
 
-        directories = [
-            base_dir / "builtin",
-            base_dir / "custom",
-            get_user_skills_dir(),  # ~/.nexus/skills
-        ]
 
-        for directory in directories:
-            if not directory.exists():
-                continue
+class SkillCatalog:
+    """Two-layer skill model: cheap catalog + on-demand full body (pure Markdown)"""
 
-            for skill_md in self.scan_directory(directory):
-                try:
-                    metadata = self.parser.to_skill_metadata(skill_md)
-                    metadata_list.append(metadata)
-                except Exception as e:
-                    logger.warning(f"Failed to parse {skill_md}: {e}")
+    _MAX_BODY_CACHE = 50  # LRU cache max size
 
-        return metadata_list
+    def __init__(self):
+        self._metadata_cache: Optional[dict[str, SkillMetadata]] = None
+
+    def describe_available(self) -> str:
+        """Return cheap catalog (name: description) for system prompt"""
+        self._ensure_metadata()
+        if not self._metadata_cache:
+            return "(no skills available)"
+        lines = []
+        for name in sorted(self._metadata_cache):
+            meta = self._metadata_cache[name]
+            triggers = ", ".join(meta.triggers[:3]) if meta.triggers else ""
+            triggers_str = f" (触发词: {triggers})" if triggers else ""
+            lines.append(f"- {name}: {meta.description}{triggers_str}")
+        return "\n".join(lines)
+
+    def load_full_text(self, name: str) -> str:
+        """Load full skill body on-demand with LRU cache (max 50 entries)."""
+        self._ensure_metadata()
+        if name not in self._metadata_cache:
+            known = ", ".join(sorted(self._metadata_cache)) or "(none)"
+            return f"Error: Unknown skill '{name}'. Available: {known}"
+
+        meta = self._metadata_cache[name]
+        if not meta.file_path or not meta.file_path.exists():
+            return f"Error: Skill file not found for '{name}'"
+
+        return self._load_body_cached(meta.name, str(meta.file_path))
+
+    @lru_cache(maxsize=50)
+    def _load_body_cached(self, name: str, file_path_str: str) -> str:
+        """Cached skill body loader. Key by (name, file_path_str) for cache isolation."""
+        meta = self._metadata_cache[name]
+        _, body = SKILLParser.parse(Path(file_path_str))
+        return f'<skill name="{meta.name}">\n{meta.description}\n{body}\n</skill>'
+
+    def _ensure_metadata(self) -> None:
+        """Ensure metadata cache is populated"""
+        if self._metadata_cache is None:
+            self._metadata_cache = {}
+            loader = SkillLoader()
+            for meta in loader.load_all():
+                self._metadata_cache[meta.name] = meta
+
+    def invalidate_cache(self, name: Optional[str] = None) -> None:
+        """Clear caches. Pass name=None to clear all."""
+        self._load_body_cached.cache_clear()
+        if name:
+            self._metadata_cache.pop(name, None)
+        else:
+            self._metadata_cache = None
 
 
 __all__ = [
     "SkillMetadata",
-    "LoadedSkill",
     "SKILLParser",
     "SkillLoader",
+    "SkillCatalog",
 ]

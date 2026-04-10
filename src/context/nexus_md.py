@@ -1,33 +1,10 @@
-"""
-NEXUS.md Loader - Static project knowledge loaded at session start
-
-Supports two levels (priority order):
-1. Global:  ~/.nexus/NEXUS.md     (user-wide knowledge)
-2. Project: ./NEXUS.md           (project-specific knowledge)
-
-File format:
----
-version: 1.0
-scope: project
-priority: 10
----
-
-# Project Knowledge
-...
-"""
-
-import re
+"""NEXUS.md Loader - Static project knowledge loaded at session start."""
 import os
-import yaml
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
-
-FRONTMATTER_PATTERN = re.compile(
-    r"^---\s*\n(.*?)\n---\s*\n(.*)$",
-    re.DOTALL | re.MULTILINE
-)
+from src.utils.frontmatter import parse_frontmatter
 
 
 @dataclass
@@ -50,8 +27,7 @@ class NexusMDLoader:
     @staticmethod
     def get_global_path() -> Path:
         """Get global NEXUS.md path: ~/.nexus/NEXUS.md"""
-        user_home = Path(os.path.expanduser("~"))
-        return user_home / ".nexus" / "NEXUS.md"
+        return Path(os.path.expanduser("~")) / ".nexus" / "NEXUS.md"
 
     @staticmethod
     def get_project_path(cwd: Optional[Path] = None) -> Optional[Path]:
@@ -71,22 +47,20 @@ class NexusMDLoader:
         if not content.strip():
             return None
 
-        match = FRONTMATTER_PATTERN.match(content)
-        if match:
-            frontmatter_str = match.group(1)
-            frontmatter = yaml.safe_load(frontmatter_str) or {}
-            metadata = NexusMDMetadata(
+        frontmatter, docstring = parse_frontmatter(content)
+        if not frontmatter:
+            # No frontmatter, treat entire content as body
+            return NexusMD(metadata=NexusMDMetadata(), content=content.strip(), source_path=file_path)
+
+        return NexusMD(
+            metadata=NexusMDMetadata(
                 version=str(frontmatter.get("version", "1.0")),
                 scope=frontmatter.get("scope", "project"),
                 priority=int(frontmatter.get("priority", 0)),
-            )
-            docstring = match.group(2).strip()
-        else:
-            # No frontmatter, treat entire content as docstring
-            metadata = NexusMDMetadata()
-            docstring = content.strip()
-
-        return NexusMD(metadata=metadata, content=docstring, source_path=file_path)
+            ),
+            content=docstring,
+            source_path=file_path,
+        )
 
     @classmethod
     def load_all(cls, cwd: Optional[Path] = None) -> list[NexusMD]:

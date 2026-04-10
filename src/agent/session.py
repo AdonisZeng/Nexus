@@ -95,6 +95,10 @@ class AgentSession(ModelProvider):
         if subagent_tool:
             subagent_tool._provider = self
 
+        # Register load_skill tool (two-layer skill model)
+        from src.tools.skill_tool import LoadSkillTool
+        self.tool_registry.register(LoadSkillTool())
+
         self.mcp_client = MCPClient()
         self.tool_orchestrator = None  # set by caller after construction
 

@@ -1,21 +1,15 @@
-"""Skill system - slash commands like Claude Code"""
+"""Skill registry - slash command registration and parsing"""
 from dataclasses import dataclass, field
-from typing import Callable, Awaitable, AsyncIterator, Any
 import re
 
 
 @dataclass
 class Skill:
-    """Skill definition - like a slash command"""
+    """Skill definition - like a slash command (pure Markdown, no handler)"""
     name: str                           # Command name (e.g., "commit")
     description: str                    # Description for help
     aliases: list = field(default_factory=list)  # Aliases (e.g., ["ci"])
-    handler: Callable = None            # Async handler function
     requires_args: bool = True          # Whether args are required
-
-    def __post_init__(self):
-        if self.aliases is None:
-            self.aliases = []
 
 
 class SkillRegistry:
@@ -27,7 +21,6 @@ class SkillRegistry:
     def register(self, skill: Skill):
         """Register a skill"""
         self.skills[skill.name] = skill
-        # Register aliases
         for alias in skill.aliases:
             self.skills[alias] = skill
 
@@ -36,8 +29,7 @@ class SkillRegistry:
         return self.skills.get(name)
 
     def list_skills(self) -> list[str]:
-        """List all skill names"""
-        # Remove aliases from list
+        """List all skill names (aliases excluded)"""
         seen = set()
         result = []
         for name in self.skills.keys():
@@ -64,7 +56,6 @@ class SkillRegistry:
         if not user_input.startswith("/"):
             return None
 
-        # Parse /command args
         match = re.match(r"/(\w+)(?:\s+(.*))?", user_input)
         if match:
             return match.group(1), match.group(2) or "", ""
@@ -72,5 +63,4 @@ class SkillRegistry:
         return None
 
 
-# Re-export for convenience
 __all__ = ["Skill", "SkillRegistry"]

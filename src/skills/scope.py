@@ -22,18 +22,20 @@ class SkillScope(Enum):
     SYSTEM = "system"  # 系统级：~/.nexus/skills/.system/
 
 
-# 作用域优先级（数字越大优先级越高）
+# 作用域优先级（数字越大优先级越高，同名 skill 高优先级覆盖低优先级）
 SCOPE_PRIORITY = {
-    SkillScope.SYSTEM: 0,
-    SkillScope.USER: 1,
-    SkillScope.REPO: 2,
+    SkillScope.REPO: 2,   # 项目级优先
+    SkillScope.USER: 1,   # 用户级次之
+    SkillScope.SYSTEM: 0, # 系统级最低（不对用户暴露）
 }
 
 
 def get_user_skills_dir() -> Path:
     """获取用户技能目录"""
     user_dir = Path(os.path.expanduser("~"))
-    return user_dir / ".nexus" / "skills"
+    nexus_skills = user_dir / ".nexus" / "skills"
+    nexus_skills.mkdir(parents=True, exist_ok=True)
+    return nexus_skills
 
 
 def get_system_skills_dir() -> Path:

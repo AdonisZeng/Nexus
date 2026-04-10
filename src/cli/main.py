@@ -10,7 +10,6 @@ from src.agent import AgentEvent, EventType, ToolDefinition, ToolResult
 from src.config import load_config, save_config, update_provider_config, set_default_provider, get_configured_providers
 from src.adapters import ModelProvider, AdapterRegistry
 from src.tools import ToolRegistry
-from src.skills import SkillRegistry
 from src.mcp import MCPClient, MCPServerConfig
 from src.context import MemoryManager, get_user_memory_dir, NexusMDLoader, AutoMemoryManager
 from src.cli.completion import create_input_session, get_input_async as comp_get_input_async
@@ -102,7 +101,6 @@ class NexusCLI(ModelProvider):
             subagent_tool._provider = self._session
 
         # UI / session state
-        self.skill_registry = SkillRegistry()
         self.memory_manager = MemoryManager()
         self.auto_memory_manager = AutoMemoryManager()
         self.session_id = str(uuid.uuid4())
@@ -112,10 +110,9 @@ class NexusCLI(ModelProvider):
         self._input_session = None
         self._completion_commands = None
 
-        # Skills directory monitoring
-        self._skills_last_check = 0
-        from src.skills import get_user_skills_dir
-        self._user_skills_dir = get_user_skills_dir()
+        # Skills directory monitoring state
+        self._skills_last_mtime = 0.0
+        self._skills_last_file_count = 0
 
         # Mode managers depend on AgentSession, not NexusCLI — keeps execution logic out of CLI layer
         from src.cli.plan_mode import PlanModeManager
@@ -302,23 +299,25 @@ class NexusCLI(ModelProvider):
         return "\n".join(lines) if lines else ""
 
     def _load_skills_prompt(self) -> None:
-        """加载所有 skills 元数据并生成 system_prompt"""
-        from src.skills import load_all_skills_metadata, get_user_skills_dir
+        """Load skills and generate system_prompt using two-layer model"""
+        from src.skills import get_skill_catalog, get_user_skills_dir
 
-        skills_metadata = load_all_skills_metadata()
-        skills_prompt = self._build_skills_prompt(skills_metadata)
+        catalog = get_skill_catalog()
 
         # 获取用户 skills 目录
         user_skills_dir = get_user_skills_dir()
 
+        # Layer 1: cheap catalog for system prompt
+        skills_catalog = catalog.describe_available()
+        skills_dir_info = f"""
+## Skills
+用户自定义技能存储在: {user_skills_dir}
+如需使用某项技能，请通过 load_skill 工具加载其完整内容。
+可用技能：
+{skills_catalog}"""
+
         # 添加工具信息
         tools_prompt = self._load_tools_prompt()
-
-        # 添加 skills 目录信息到 system prompt
-        skills_dir_info = f"""
-## 用户技能目录
-用户自定义技能存储在: {user_skills_dir}
-如需重新加载技能，请使用 /reload 命令"""
 
         # 添加时间信息到 system prompt
         from datetime import datetime
@@ -356,7 +355,7 @@ class NexusCLI(ModelProvider):
         # 合并到 system_prompt
         base_prompt = self.config.get("system_prompt", "You are Nexus, a helpful AI assistant.")
         parts = [base_prompt, time_info, workspace_info, commands_info,
-                 skills_dir_info, tools_prompt, nexus_section, memories_section, skills_prompt]
+                 skills_dir_info, tools_prompt, nexus_section, memories_section]
         self.system_prompt = "\n\n".join([p for p in parts if p])
 
     def _build_commands_prompt(self) -> str:
@@ -382,63 +381,46 @@ class NexusCLI(ModelProvider):
         return "\n".join(lines)
 
     def _check_and_reload_skills(self) -> bool:
-        """检查 skills 目录是否有变化，如有则重新加载"""
-        import time
-        import os
+        """检查 skills 目录是否有变化，如有则重新加载（两层模型）"""
+        from src.skills import get_user_skills_dir
 
-        if not self._user_skills_dir.exists():
+        user_skills_dir = get_user_skills_dir()
+        if not user_skills_dir.exists():
             return False
 
-        # 获取目录最新修改时间
+        # 获取所有 SKILL.md 文件的最新修改时间和数量
         latest_mtime = 0
-        for root, dirs, files in os.walk(self._user_skills_dir):
-            for f in files:
-                if f == "SKILL.md":
-                    fpath = os.path.join(root, f)
-                    mtime = os.path.getmtime(fpath)
-                    if mtime > latest_mtime:
-                        latest_mtime = mtime
+        file_count = 0
+        for f in user_skills_dir.rglob("SKILL.md"):
+            file_count += 1
+            mtime = f.stat().st_mtime
+            if mtime > latest_mtime:
+                latest_mtime = mtime
 
-        # 首次调用（值为0），只记录不加载
-        if self._skills_last_check == 0 and latest_mtime > 0:
-            self._skills_last_check = latest_mtime
+        # 获取上次状态
+        prev_mtime = getattr(self, '_skills_last_mtime', 0)
+        prev_count = getattr(self, '_skills_last_file_count', 0)
+
+        # 首次调用（prev_mtime == 0 且目录不为空），只记录不加载
+        if prev_mtime == 0 and latest_mtime > 0:
+            self._skills_last_mtime = latest_mtime
+            self._skills_last_file_count = file_count
             return False
 
-        # 如果有变化，重新加载
-        if latest_mtime > self._skills_last_check:
-            self._skills_last_check = latest_mtime
+        # 文件数量变化（新增/删除）或最新 mtime 上升时触发重载
+        if file_count != prev_count or latest_mtime > prev_mtime:
+            self._skills_last_mtime = latest_mtime
+            self._skills_last_file_count = file_count
             self._reload_skills()
             return True
         return False
 
     def _reload_skills(self) -> None:
-        """重新加载所有 skills"""
-        from src.skills import SkillLoader
+        """重新加载所有 skills（两层模型：只需清除缓存）"""
+        from src.skills import get_skill_catalog
 
-        # 重新加载 skills
-        loader = SkillLoader()
-        skills = loader.load_all()
-
-        # 重新注册到 registry
-        from src.skills import Skill
-        self.skill_registry = SkillRegistry()
-
-        # 重新加载 skill handlers
-        for skill in skills:
-            if skill.handler:
-                skill_obj = Skill(
-                    name=skill.name,
-                    description=skill.description,
-                    aliases=skill.aliases,
-                    handler=skill.handler,
-                    requires_args=skill.requires_args
-                )
-                self.skill_registry.register(skill_obj)
-
-        # 重新生成 system_prompt
+        get_skill_catalog().invalidate_cache()
         self._load_skills_prompt()
-
-        # 更新补全命令
         self._update_completion_commands()
 
     def enter_plan_mode(self) -> None:
@@ -461,39 +443,12 @@ class NexusCLI(ModelProvider):
         self.tasks_mode = False
         self.tasks_manager.exit()
 
-    def _build_skills_prompt(self, skills_metadata: list) -> str:
-        """生成可用 skills 的提示词"""
-        if not skills_metadata:
-            return ""
-
-        lines = ["<available_skills>"]
-        for skill in skills_metadata:
-            location = str(skill.file_path) if skill.file_path else "built-in"
-            lines.append(f"""  <skill>
-    <name>{skill.name}</name>
-    <description>{skill.description}</description>
-    <location>{location}</location>
-  </skill>""")
-        lines.append("</available_skills>")
-        return "\n".join(lines)
-
     async def execute_task(self, task: str) -> AsyncIterator[AgentEvent]:
         """Execute a task and yield events.
 
         Skill commands are handled here (CLI layer); all other execution
         is delegated to AgentSession.
         """
-        # Check for skill command first (CLI-layer concern)
-        parsed = self.skill_registry.parse_input(task)
-        if parsed:
-            skill_name, args, _ = parsed
-            skill = self.skill_registry.get(skill_name)
-            if skill:
-                context = {"cwd": ".", "messages": self.messages}
-                async for event in skill.handler(args, context):
-                    yield event
-                return
-
         # Update title from first user message (session metadata, stays in CLI)
         if self.current_title == "新对话" and task:
             self.current_title = task[:50] + ("..." if len(task) > 50 else "")
@@ -517,8 +472,7 @@ class NexusCLI(ModelProvider):
             "/mcpstatus",
             "/plan",
         ]
-        skill_commands = [f"/{name}" for name in self.skill_registry.list_skills()]
-        self._completion_commands = builtin_commands + skill_commands
+        self._completion_commands = builtin_commands
 
         self._input_session = create_input_session(self._completion_commands)
 
@@ -563,8 +517,6 @@ class NexusCLI(ModelProvider):
     async def chat(self):
         """Run interactive chat"""
         print_welcome()
-
-        # 启动时加载一次 skills
         self._reload_skills()
 
         while True:

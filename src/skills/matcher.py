@@ -2,10 +2,10 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional, list
+from typing import Optional
 from difflib import SequenceMatcher
 
-from .loader import SkillMetadata, LoadedSkill
+from .loader import SkillMetadata
 
 
 @dataclass
@@ -161,36 +161,16 @@ class SkillMatcher:
 
 
 class AutoSkillMatcher:
-    """Automatically match and invoke skills based on user input"""
+    """Automatically match skills based on user input"""
 
-    def __init__(self, skills: list[LoadedSkill]):
+    def __init__(self, skills: list[SkillMetadata]):
         self.skills = skills
         self.matcher = SkillMatcher()
 
-    def find_skill(self, user_input: str, threshold: float = 0.5) -> Optional[LoadedSkill]:
+    def find_skill(self, user_input: str, threshold: float = 0.5) -> Optional[SkillMetadata]:
         """Find the best matching skill for user input"""
-        metadata_list = [
-            SkillMetadata(
-                name=s.name,
-                description=s.description,
-                triggers=s.triggers,
-                aliases=s.aliases,
-                license=s.license,
-                requires_args=s.requires_args,
-                docstring=s.docstring,
-                file_path=s.file_path,
-            )
-            for s in self.skills
-        ]
-
-        result = self.matcher.match(user_input, metadata_list, threshold)
-        if result:
-            # Return the full skill with handler
-            for skill in self.skills:
-                if skill.name == result.skill.name:
-                    return skill
-
-        return None
+        result = self.matcher.match(user_input, self.skills, threshold)
+        return result.skill if result else None
 
     def get_available_skills_description(self) -> str:
         """Get a description of all available skills for system prompt"""
