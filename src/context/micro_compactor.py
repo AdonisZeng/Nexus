@@ -8,11 +8,19 @@ Supports dual message formats:
 - list[dict] (AgentSession.messages format)
 - list[ContextMessage] (AgentContext.short_term_memory format)
 """
+from dataclasses import dataclass
 from typing import Union, List, Optional, Protocol
 
 # Placeholder text for compacted tool results
 TOOL_RESULT_PLACEHOLDER = "[Earlier tool result compacted. Re-run the tool if you need full detail.]"
 MICRO_COMPACT_THRESHOLD = 120  # chars > this threshold get compacted
+
+
+@dataclass
+class MicroCompactConfig:
+    """Configuration for MicroCompactor."""
+    keep_recent: int = 3
+    threshold: int = 120  # chars > this threshold get compacted
 
 
 class _MessageAdapter(Protocol):
