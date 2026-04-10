@@ -48,6 +48,7 @@ from .micro_compactor import (
     micro_compact_messages,
     get_compactor,
 )
+from .consolidator import MemoryConsolidator, get_consolidator
 
 __all__ = [
     "ContextMessage",
@@ -81,4 +82,7 @@ __all__ = [
     "MicroCompactConfig",
     "micro_compact_messages",
     "get_compactor",
+    # Consolidation
+    "MemoryConsolidator",
+    "get_consolidator",
 ]

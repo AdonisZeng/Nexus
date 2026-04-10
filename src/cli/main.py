@@ -235,9 +235,15 @@ class NexusCLI(ModelProvider):
         if len(self.messages) <= 4:
             return 0
         try:
-            return await self.auto_memory_manager.process_session(
+            count = await self.auto_memory_manager.process_session(
                 self.messages, self.session_id, self.model_adapter
             )
+
+            # Trigger consolidation if memories were saved
+            if count > 0:
+                self.auto_memory_manager.trigger_consolidation(self.model_adapter)
+
+            return count
         except Exception as e:
             logger.warning(f"Auto Memory: failed: {e}")
             return 0
@@ -355,10 +361,17 @@ class NexusCLI(ModelProvider):
             if memories_section:
                 memories_section = f"\n{memories_section}\n"
 
+        # 加载记忆指导
+        guidance_section = ""
+        if hasattr(self, 'auto_memory_manager'):
+            guidance = self.auto_memory_manager.get_guidance()
+            if guidance:
+                guidance_section = f"\n## 记忆指导\n{guidance}\n"
+
         # 合并到 system_prompt
         base_prompt = self.config.get("system_prompt", "You are Nexus, a helpful AI assistant.")
         parts = [base_prompt, time_info, workspace_info, commands_info,
-                 skills_dir_info, tools_prompt, nexus_section, memories_section, hooks_info]
+                 skills_dir_info, tools_prompt, nexus_section, memories_section, guidance_section, hooks_info]
         self.system_prompt = "\n\n".join([p for p in parts if p])
 
     def _build_commands_prompt(self) -> str:

@@ -1,5 +1,6 @@
 """
 Auto Memory Manager - AI-powered selective memory storage"""
+
 import hashlib
 import logging
 from pathlib import Path
@@ -9,27 +10,50 @@ from typing import Optional
 
 import yaml
 
-from src.utils.frontmatter import parse_frontmatter
+from src.utils.frontmatter import parse_frontmatter, serialize_frontmatter
 
 
 logger = logging.getLogger("Nexus")
 
 
-# Memory entry type definitions
-ENTRY_TYPES = ["decision", "fact", "pattern", "preference"]
-CATEGORIES = ["architecture", "coding", "project", "personal"]
+# Memory type definitions (replaces entry_type + category)
+MEMORY_TYPES = ["user", "feedback", "project", "reference"]
+
+# Emoji mapping for memory types in prompt display
+MEMORY_TYPE_EMOJI = {
+    "user": "👤",
+    "feedback": "💬",
+    "project": "📁",
+    "reference": "🔗",
+}
+
+# Memory guidance for LLM decision-making
+MEMORY_GUIDANCE = """
+When to save memories:
+- User states a preference ("I like tabs", "always use pytest") -> type: user
+- User corrects you ("don't do X", "that was wrong because...") -> type: feedback
+- You learn a project fact that is not easy to infer from current code alone
+  (for example: a rule exists because of compliance, or a legacy module must
+  stay untouched for business reasons) -> type: project
+- You learn where an external resource lives (ticket board, dashboard, docs URL)
+  -> type: reference
+When NOT to save:
+- Anything easily derivable from code (function signatures, file structure, directory layout)
+- Temporary task state (current branch, open PR numbers, current TODOs)
+- Secrets or credentials (API keys, passwords)
+"""
 
 
 @dataclass
 class MemoryEntry:
     """Single memory entry."""
-    entry_type: str       # decision/fact/pattern/preference
-    category: str         # architecture/coding/project/personal
+    memory_type: str      # user/feedback/project/reference
     content: str          # Full memory content
     tags: list[str] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat())
     session_id: str = ""
     summary: str = ""     # One-line summary for index
+    memory_scope: str = "cross_session"  # session/cross_session
 
 
 class AutoMemoryManager:
@@ -42,16 +66,22 @@ class AutoMemoryManager:
 
         self.memory_dir = memory_dir
         self.entries_dir = self.memory_dir / "entries"
+        self.session_dir = self.memory_dir / "session_entries"
         self.index_path = self.memory_dir / "memory.md"
 
-        # Create entries directory if needed
+        # Create entries directories if needed
         self.entries_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir.mkdir(parents=True, exist_ok=True)
 
     def _generate_entry_filename(self, content: str) -> str:
         """Generate unique filename based on timestamp and content hash."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         hash_suffix = hashlib.md5(content.encode()).hexdigest()[:8]
         return f"{timestamp}_{hash_suffix}.md"
+
+    def get_guidance(self) -> str:
+        """Return memory guidance for system prompt injection."""
+        return MEMORY_GUIDANCE
 
     async def decide_memories(
         self,
@@ -61,27 +91,25 @@ class AutoMemoryManager:
         """Use LLM to decide what to remember from the session."""
         formatted = self._format_session_for_analysis(session_messages)
 
-        prompt = f"""你是一个记忆决策助手。分析以下对话，提取值得长期保存的信息。
+        prompt = f"""{MEMORY_GUIDANCE}
 
 【记忆类型定义】
-- decision: 重要的架构或技术决策
-- fact: 事实性的信息（如项目配置、技术栈、已确定的方案）
-- pattern: 常见的代码模式或约定
-- preference: 用户偏好或团队约定
+- user: 用户偏好 ("I like tabs", "always use pytest")
+- feedback: 用户纠正或批评 ("don't do X", "that was wrong because...")
+- project: 非显而易见项目事实 (合规原因、遗留模块必须保留等)
+- reference: 外部资源位置 (ticket board、dashboard、文档URL)
 
-【提取标准】
-只有满足以下条件才值得记忆：
-1. 可能在未来重复使用
-2. 提供重要上下文
-3. 非临时性的内容
+【记忆范围】
+- session: 仅当前会话有用，不值得长期保存
+- cross_session: 值得在多个会话间保持
 
 【输出格式】
 每个记忆按以下格式输出，多个记忆用空行分隔：
 
 TYPE: <type>
-CATEGORY: <category>
 SUMMARY: <一行总结，不超过50字>
 TAGS: <标签，逗号分隔，最多3个>
+SCOPE: <session/cross_session>
 CONTENT:
 <完整记忆内容，要详细到足以在未来独立理解>
 
@@ -154,14 +182,14 @@ NONE
                 break
 
             if line_stripped.startswith("TYPE:"):
-                current["type"] = line_stripped[5:].strip().lower()
-            elif line_stripped.startswith("CATEGORY:"):
-                current["category"] = line_stripped[9:].strip().lower()
+                current["memory_type"] = line_stripped[5:].strip().lower()
             elif line_stripped.startswith("SUMMARY:"):
                 current["summary"] = line_stripped[8:].strip()
             elif line_stripped.startswith("TAGS:"):
                 tags_str = line_stripped[5:].strip()
                 current["tags"] = [t.strip() for t in tags_str.split(",") if t.strip()]
+            elif line_stripped.startswith("SCOPE:"):
+                current["scope"] = line_stripped[6:].strip().lower()
             elif line_stripped.startswith("CONTENT:"):
                 in_content = True
                 current_content_lines = []
@@ -169,15 +197,16 @@ NONE
                 current_content_lines.append(line)
 
             # Check if we have a complete entry
-            if current.get("type") and current.get("category") and current_content_lines:
+            if current.get("memory_type") and current_content_lines:
                 content = "\n".join(current_content_lines).strip()
                 if len(content) > 20:  # Minimum content length
                     entry = MemoryEntry(
-                        entry_type=current.get("type", "fact"),
-                        category=current.get("category", "project"),
+                        memory_type=current.get("memory_type", "project"),
                         content=content,
                         tags=current.get("tags", []),
                         summary=current.get("summary", content[:80]),
+                        session_id="",  # Will be set by caller
+                        memory_scope=current.get("scope", "cross_session"),
                     )
                     entries.append(entry)
 
@@ -191,28 +220,28 @@ NONE
     def save_entry(self, entry: MemoryEntry, session_id: str = "") -> Path:
         """Save a single memory entry to a file."""
         filename = self._generate_entry_filename(entry.content)
-        filepath = self.entries_dir / filename
+
+        # Choose directory based on scope
+        if entry.memory_scope == "session":
+            target_dir = self.session_dir
+        else:
+            target_dir = self.entries_dir
+
+        filepath = target_dir / filename
 
         frontmatter = {
-            "type": entry.entry_type,
-            "category": entry.category,
+            "memory_type": entry.memory_type,
             "created": entry.created,
             "session_id": session_id or entry.session_id,
             "tags": entry.tags,
             "summary": entry.summary,
+            "scope": entry.memory_scope,
         }
 
-        content_parts = [
-            "---",
-            yaml.dump(frontmatter, allow_unicode=True, default_flow_style=False).strip(),
-            "---",
-            "",
-            f"# {entry.summary}",
-            "",
-            entry.content,
-        ]
-
-        filepath.write_text("\n".join(content_parts), encoding="utf-8")
+        filepath.write_text(
+            serialize_frontmatter(frontmatter, entry.content, entry.summary),
+            encoding="utf-8"
+        )
         logger.debug(f"Auto Memory: saved entry to {filepath}")
         return filepath
 
@@ -227,7 +256,7 @@ NONE
 
         if not entries:
             # No entries, write minimal index
-            index_content = "---\nversion: 1.0\nupdated: {}\n---\n\n# Memory Index\n\nNo memories saved yet.\n".format(
+            index_content = "---\nversion: 2.0\nupdated: {}\n---\n\n# Memory Index\n\nNo memories saved yet.\n".format(
                 datetime.now().isoformat()
             )
             self.index_path.write_text(index_content, encoding="utf-8")
@@ -235,7 +264,7 @@ NONE
 
         lines = [
             "---",
-            "version: 1.0",
+            "version: 2.0",
             f"updated: {datetime.now().isoformat()}",
             "---",
             "",
@@ -245,25 +274,25 @@ NONE
             "",
             "## Recent Memories (last 10)",
             "",
-            "| Category | Summary | Tags | Date |",
-            "|----------|---------|------|------|",
+            "| Type | Scope | Summary | Tags | Date |",
+            "|------|-------|---------|------|------|",
         ]
 
         for entry in entries[:10]:
             tags_str = ",".join(entry.tags[:3]) if entry.tags else "-"
             date = entry.created[:10] if len(entry.created) >= 10 else entry.created
             summary = entry.summary[:50] + "..." if len(entry.summary) > 50 else entry.summary
-            lines.append(f"| {entry.category} | {summary} | {tags_str} | {date} |")
+            lines.append(f"| {entry.memory_type} | {entry.memory_scope} | {summary} | {tags_str} | {date} |")
 
         lines.extend(["", "## All Memories", ""])
 
-        # Group by category
-        for cat in CATEGORIES:
-            cat_entries = [e for e in entries if e.category == cat]
-            if not cat_entries:
+        # Group by memory_type
+        for mem_type in MEMORY_TYPES:
+            type_entries = [e for e in entries if e.memory_type == mem_type]
+            if not type_entries:
                 continue
-            lines.append(f"### {cat}")
-            for entry in cat_entries:
+            lines.append(f"### {mem_type}")
+            for entry in type_entries:
                 date = entry.created[:10] if len(entry.created) >= 10 else entry.created
                 lines.append(f"- [{date}] {entry.summary}")
             lines.append("")
@@ -272,11 +301,17 @@ NONE
         logger.debug(f"Auto Memory: updated index with {len(entries)} entries")
 
     def _parse_entry_file(self, file_path: Path) -> Optional[MemoryEntry]:
-        """Parse a memory entry file."""
+        """Parse a memory entry file with backward compatibility for old formats."""
         try:
             frontmatter, docstring = parse_frontmatter(file_path.read_text(encoding="utf-8"))
             if not frontmatter:
                 return None
+
+            # Backward compatibility: handle old format (type + category)
+            memory_type = frontmatter.get("memory_type") or frontmatter.get("type", "project")
+
+            # Old category field is dropped - it was redundant with memory_type
+            scope = frontmatter.get("scope", "cross_session")
 
             summary = frontmatter.get("summary", "")
             if not summary and docstring:
@@ -284,13 +319,13 @@ NONE
                 summary = first_line[2:].strip() if first_line.startswith("# ") else docstring[:80]
 
             return MemoryEntry(
-                entry_type=frontmatter.get("type", "fact"),
-                category=frontmatter.get("category", "project"),
+                memory_type=memory_type,
                 content=docstring,
                 tags=frontmatter.get("tags", []),
                 created=frontmatter.get("created", ""),
                 session_id=frontmatter.get("session_id", ""),
                 summary=summary,
+                memory_scope=scope,
             )
         except Exception as e:
             logger.warning(f"Auto Memory: failed to parse entry {file_path}: {e}")
@@ -325,6 +360,24 @@ NONE
         """Load recent memories for context injection."""
         entries = []
 
+        # Get entries from both directories
+        all_files = sorted(
+            list(self.entries_dir.glob("*.md")) + list(self.session_dir.glob("*.md")),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True
+        )[:limit]
+
+        for entry_file in all_files:
+            entry = self._parse_entry_file(entry_file)
+            if entry:
+                entries.append(entry)
+
+        return entries
+
+    def get_cross_session_memories(self, limit: int = 20) -> list[MemoryEntry]:
+        """Load cross-session memories only (for loading into AgentContext)."""
+        entries = []
+
         for entry_file in sorted(self.entries_dir.glob("*.md"), reverse=True)[:limit]:
             entry = self._parse_entry_file(entry_file)
             if entry:
@@ -342,16 +395,36 @@ NONE
         lines = ["## 长期记忆", ""]
 
         for entry in entries:
-            cat_emoji = {
-                "architecture": "🏗️",
-                "coding": "💻",
-                "project": "📁",
-                "personal": "👤",
-            }.get(entry.category, "📝")
-
-            lines.append(f"**{cat_emoji} {entry.category}**: {entry.summary}")
+            emoji = MEMORY_TYPE_EMOJI.get(entry.memory_type, "📝")
+            lines.append(f"**{emoji} {entry.memory_type}**: {entry.summary}")
 
         return "\n".join(lines)
 
+    def trigger_consolidation(self, model_adapter=None) -> bool:
+        """
+        Trigger memory consolidation if conditions are met.
+        Called after session processing.
 
-__all__ = ["AutoMemoryManager", "MemoryEntry"]
+        Returns True if consolidation was triggered.
+        """
+        from .consolidator import get_consolidator
+
+        consolidator = get_consolidator(self.memory_dir)
+        can_run, reason = consolidator.should_consolidate()
+
+        if not can_run:
+            logger.debug(f"AutoMemoryManager: Consolidation skipped: {reason}")
+            return False
+
+        # Run consolidation asynchronously
+        if model_adapter:
+            import asyncio
+            asyncio.create_task(consolidator.consolidate(model_adapter))
+            logger.info("AutoMemoryManager: Consolidation scheduled")
+            return True
+        else:
+            logger.debug("AutoMemoryManager: Consolidation requires model_adapter")
+            return False
+
+
+__all__ = ["AutoMemoryManager", "MemoryEntry", "MEMORY_GUIDANCE"]

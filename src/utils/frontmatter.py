@@ -26,3 +26,24 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         return frontmatter, body
     except yaml.YAMLError:
         return {}, body
+
+
+def serialize_frontmatter(data: dict, body: str = "", title: str = None) -> str:
+    """
+    Serialize dict as YAML frontmatter with optional body.
+
+    Args:
+        data: Frontmatter dictionary
+        body: Optional body content
+        title: Optional title (adds "# title" line after frontmatter)
+
+    Returns:
+        Frontmatter-formatted string: "---\n<yaml>\n---\n[<title>\n]<body>"
+    """
+    yaml_content = yaml.dump(data, allow_unicode=True, default_flow_style=False).strip()
+    parts = ["---", yaml_content, "---"]
+    if title:
+        parts.extend(["", f"# {title}"])
+    if body:
+        parts.extend(["", body])
+    return "\n".join(parts)

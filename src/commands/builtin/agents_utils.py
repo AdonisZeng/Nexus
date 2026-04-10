@@ -50,11 +50,8 @@ class AgentConfigEditor:
             frontmatter["timeout-seconds"] = config.timeout_seconds
 
         # Write file
-        import yaml
-        content = "---\n"
-        content += yaml.dump(frontmatter, allow_unicode=True, default_flow_style=False)
-        content += "---\n"
-        content += config.system_prompt.strip() + "\n"
+        from src.utils.frontmatter import serialize_frontmatter
+        content = serialize_frontmatter(frontmatter, config.system_prompt.strip())
 
         file_path.write_text(content, encoding="utf-8")
 
