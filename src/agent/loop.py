@@ -26,6 +26,14 @@ from .context import AgentContext, ConversationState, ToolCallEntry, ContextMess
 from .work_item import WorkItemSource, WorkItem
 from src.tools.tracker import ToolCallTracker
 from src.hooks import HookRunner
+from src.error import (
+    MAX_RECOVERY_ATTEMPTS,
+    MAX_RETRIES_PER_TASK,
+    BACKOFF_BASE_DELAY,
+    BACKOFF_MAX_DELAY,
+    ErrorRecovery,
+    RecoveryStrategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +157,7 @@ class AgentLoop:
         self.context.state.max_iterations = max_iterations
         self.context.state.timeout_seconds = timeout_seconds
 
-        self.max_retries = max_retries
+        self.max_retries = MAX_RECOVERY_ATTEMPTS if max_retries is None else max_retries
         self.context_threshold = context_threshold
         self.reasoning = reasoning
         self.verification = verification
@@ -183,8 +191,7 @@ class AgentLoop:
         # Work item retry tracking
         self._failed_work_item: Optional[WorkItem] = None
         self._failed_work_error: str = ""
-        self._retry_count: int = 0
-        self._max_retries_per_task: int = 3
+        self._max_retries_per_task: int = MAX_RETRIES_PER_TASK
 
         # Stop reason tracking for confirmation flow (SubagentRunner)
         self._last_stop_reason: Optional[str] = None
@@ -270,7 +277,7 @@ class AgentLoop:
         max_retries: int = None,
     ) -> tuple[Any, bool]:
         """
-        Execute a function with exponential backoff retry.
+        Execute a function with exponential backoff retry and jitter.
 
         Args:
             func: Async function to execute
@@ -293,16 +300,32 @@ class AgentLoop:
                 last_error = e
                 self._retry_count += 1
                 if attempt < max_retries:
-                    wait_time = 2 ** attempt
+                    wait_time = ErrorRecovery.calculate_backoff_delay(attempt)
                     logger.warning(
                         f"Attempt {attempt + 1} failed: {e}. "
-                        f"Retrying in {wait_time}s..."
+                        f"Retrying in {wait_time:.1f}s..."
                     )
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"All {max_retries + 1} attempts failed: {e}")
 
         return None, False
+
+    async def handle_max_tokens_recovery(
+        self,
+        messages: list,
+        recovery_count: int,
+    ) -> tuple[bool, int]:
+        """Handle max_tokens recovery by injecting continuation message.
+
+        Args:
+            messages: Conversation messages list
+            recovery_count: Current recovery attempt count
+
+        Returns:
+            Tuple of (should_retry, new_recovery_count)
+        """
+        return await ErrorRecovery.handle_max_tokens(messages, recovery_count)
 
     def calculate_context_length(self) -> int:
         """Calculate total character length of context messages."""

@@ -4,162 +4,12 @@ from .formatter import MessageFormatter
 from typing import Any, List, Optional, AsyncIterator
 import asyncio
 import httpx
-import json
 import os
-import re
 
 from src.utils import get_logger
+from src.error import robust_json_parse, execute_with_retry, ErrorRecovery
 
 logger = get_logger("adapters.custom")
-
-
-def _robust_json_parse(raw_str: str) -> dict:
-    """Robustly parse a JSON string that may have escaping issues.
-
-    Tries multiple strategies:
-    1. Standard JSON parsing
-    2. Fix unescaped newlines within JSON strings
-    3. Extract key fields using regex
-
-    @param raw_str: Raw string that should be JSON
-    @return Parsed dictionary or error dict with __parse_error__
-    """
-    if not raw_str:
-        return {"__parse_error__": "Empty raw_arguments"}
-
-    # Strategy 1: Try standard JSON parsing
-    try:
-        return json.loads(raw_str)
-    except json.JSONDecodeError:
-        pass
-
-    # Strategy 2: Fix common escaping issues in JSON strings
-    # The model often returns JSON where code content has literal newlines
-    # instead of \n escapes, or has unescaped quotes within strings
-    try:
-        result = {}
-        i = 0
-        length = len(raw_str)
-
-        # Simple state machine to find and fix JSON string values
-        while i < length:
-            # Find a string start
-            if raw_str[i] == '"':
-                # Mark start of string
-                string_start = i
-                i += 1
-                string_content = []
-
-                # Parse through the string, handling escapes
-                while i < length:
-                    char = raw_str[i]
-
-                    if char == '\\':
-                        # Escaped character - keep as-is
-                        string_content.append(raw_str[i:i+2])
-                        i += 2
-                    elif char == '"':
-                        # End of string
-                        i += 1
-                        break
-                    elif char == '\n' or char == '\r':
-                        # Unescaped newline in string - fix it
-                        string_content.append('\\n')
-                        i += 1
-                    else:
-                        string_content.append(char)
-                        i += 1
-
-                # Check what key this string belongs to
-                # Look backwards for the key
-                key_start = string_start
-                while key_start > 0 and raw_str[key_start-1] in ' \t\n\r:':
-                    key_start -= 1
-                key_end = string_start
-                while key_end < len(raw_str) and raw_str[key_end] != ':':
-                    key_end += 1
-                key = raw_str[key_start:key_end].strip() if (key_end > key_start) else ""
-
-                # Look forward for colon
-                value_start = i
-                while value_start < length and raw_str[value_start] not in ':':
-                    value_start += 1
-                value_start += 1  # skip colon
-
-                # Find the end of this value (comma, }, or end)
-                value_end = value_start
-                while value_end < length and raw_str[value_end] not in ',}':
-                    value_end += 1
-
-                # Store the fixed string content
-                fixed_str = ''.join(string_content)
-                if key in ('file_path', 'path', 'pattern', 'command'):
-                    result[key] = fixed_str
-                elif key == 'content' and 'content' not in result:
-                    # For content, might appear multiple times - take first substantial one
-                    result['content'] = fixed_str
-
-            i += 1
-
-        if result and len(result) >= 2:  # Require at least file_path and content
-            logger.debug(f"[Custom] _robust_json_parse: 状态机解析成功: {list(result.keys())}")
-            return result
-
-    except Exception as e:
-        logger.debug(f"[Custom] _robust_json_parse: 状态机解析失败: {e}")
-
-    # Strategy 3: Try to extract fields using regex for common tool schemas
-    try:
-        result = {}
-
-        # Try to extract file_path
-        file_path_match = re.search(r'"file_path"\s*:\s*"([^"]*)"', raw_str)
-        if file_path_match:
-            result["file_path"] = file_path_match.group(1)
-
-        # Try to extract content - more robust pattern that handles newlines
-        content_match = re.search(r'"content"\s*:\s*"(.*?)"(?=\s*[,\}])', raw_str, re.DOTALL)
-        if content_match:
-            result["content"] = content_match.group(1)
-
-        # Try to extract command
-        cmd_match = re.search(r'"command"\s*:\s*"([^"]*)"', raw_str)
-        if cmd_match:
-            result["command"] = cmd_match.group(1)
-
-        # Try to extract patch
-        patch_match = re.search(r'"patch"\s*:\s*"(.*?)"(?=\s*[,\}])', raw_str, re.DOTALL)
-        if patch_match:
-            result["patch"] = patch_match.group(1)
-
-        # Try to extract path
-        path_match = re.search(r'"path"\s*:\s*"([^"]*)"', raw_str)
-        if path_match:
-            result["path"] = path_match.group(1)
-
-        # Try to extract pattern
-        pattern_match = re.search(r'"pattern"\s*:\s*"([^"]*)"', raw_str)
-        if pattern_match:
-            result["pattern"] = pattern_match.group(1)
-
-        # Try to extract dir_path
-        dir_path_match = re.search(r'"dir_path"\s*:\s*"([^"]*)"', raw_str)
-        if dir_path_match:
-            result["dir_path"] = dir_path_match.group(1)
-
-        if result:
-            logger.debug(f"[Custom] _robust_json_parse: 正则提取成功: {list(result.keys())}")
-            return result
-
-    except Exception as e:
-        logger.debug(f"[Custom] _robust_json_parse: 正则提取失败: {e}")
-
-    # All strategies failed
-    logger.warning(f"[Custom] _robust_json_parse: 所有解析策略均失败")
-    return {
-        "__parse_error__": f"无法解析 JSON (长度={len(raw_str)}): {raw_str[:200]}...",
-        "__raw_original__": raw_str[:2000]  # 保存原始内容供调试
-    }
 
 
 class CustomAdapter(ModelAdapter):
@@ -278,7 +128,7 @@ class CustomAdapter(ModelAdapter):
             except retryable_exceptions as e:
                 last_exception = e
                 if attempt < self.max_retries - 1:
-                    delay = self.retry_delay * (2 ** attempt)  # Exponential backoff
+                    delay = ErrorRecovery.calculate_backoff_delay(attempt)
                     logger.warning(
                         f"{operation_name} failed (attempt {attempt + 1}/{self.max_retries}): {e}. "
                         f"Retrying in {delay:.1f}s..."
@@ -351,7 +201,7 @@ class CustomAdapter(ModelAdapter):
                     raw_args_str = input_data["raw_arguments"]
                     logger.debug(f"[Custom] raw_arguments 原始值长度={len(raw_args_str)} | 前100字符={raw_args_str[:100]}")
                     # Use robust parsing that handles escaping issues
-                    args = _robust_json_parse(raw_args_str)
+                    args = robust_json_parse(raw_args_str)
                     if "__parse_error__" in args:
                         logger.warning(f"[Custom] raw_arguments 解析失败: {args['__parse_error__']}")
                 else:
