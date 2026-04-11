@@ -77,6 +77,7 @@ class SubagentTool(ModelProviderMixin, Tool):
         prompt: str,
         agent: Optional[str] = None,
         background: bool = False,
+        parallel_tasks: Optional[list[str]] = None,
         **kwargs: Any
     ) -> str:
         """
@@ -86,6 +87,7 @@ class SubagentTool(ModelProviderMixin, Tool):
             prompt: The task instruction for the subagent
             agent: Optional subagent name. If not provided, auto-routes based on prompt
             background: If True, run subagent in background and return task_id immediately
+            parallel_tasks: Explicit list of tasks to execute in parallel (bypasses prompt parsing)
 
         Returns:
             For background=False: The subagent's final output message
@@ -99,9 +101,13 @@ class SubagentTool(ModelProviderMixin, Tool):
 
         prompt = prompt.strip()
 
-        # Check for parallel execution hint
-        if "parallel:" in prompt[:50].lower():
-            return await self._execute_parallel(prompt, agent)
+        # Check for parallel execution: priority is explicit parallel_tasks > prompt prefix
+        if parallel_tasks:
+            return await self._execute_parallel_tasks(parallel_tasks, agent)
+        elif "parallel:" in prompt[:50].lower():
+            # Legacy: parse from prompt prefix (kept for backwards compatibility)
+            tasks = self._parse_parallel_prompt(prompt)
+            return await self._execute_parallel_tasks(tasks, agent)
 
         # Get subagent config
         config = self._resolve_agent(prompt, agent)
@@ -148,7 +154,7 @@ class SubagentTool(ModelProviderMixin, Tool):
 
         sink.print(f"[dim]子代理 [{config.name}] 执行完成[/dim]")
 
-        return self._format_result(config.name, result)
+        return self._format_result(config.name, config.result_mode, result)
 
     async def _execute_background(
         self,
@@ -197,24 +203,23 @@ class SubagentTool(ModelProviderMixin, Tool):
 
         return config
 
-    async def _execute_parallel(
+    async def _execute_parallel_tasks(
         self,
-        prompt: str,
+        tasks: list[str],
         default_agent: Optional[str]
     ) -> str:
         """Execute multiple subagents in truly parallel using asyncio.gather"""
         self._ensure_loaded()
 
-        # Parse parallel tasks from prompt
-        # Format: "parallel:\n- task 1\n- task 2\n- task 3"
-        lines = prompt.split("\n")
-        tasks = [line.strip() for line in lines[1:] if line.strip()]
-
         if not tasks:
-            return "Error: parallel prompt format invalid"
+            return "Error: no tasks to execute"
 
         sink = get_output_sink()
         sink.print(f"[dim]正在并行调用 {len(tasks)} 个子代理...[/dim]")
+
+        # Get adapter and tool_registry once, reuse across all parallel tasks
+        adapter = self._get_adapter()
+        tool_registry = self._get_tool_registry()
 
         async def run_task(task: str) -> str:
             """Run a single task in the subagent"""
@@ -222,11 +227,9 @@ class SubagentTool(ModelProviderMixin, Tool):
             if not config:
                 return f"[Skipped: no agent for '{task[:30]}...']"
 
-            adapter = self._get_adapter()
-            tool_registry = self._get_tool_registry()
             runner = SubagentRunner(config=config, adapter=adapter, tool_registry=tool_registry)
             result = await runner.run(task)
-            return self._format_result(config.name, result)
+            return self._format_result(config.name, config.result_mode, result)
 
         # Execute all tasks in parallel using asyncio.gather
         results = await asyncio.gather(
@@ -246,11 +249,21 @@ class SubagentTool(ModelProviderMixin, Tool):
 
         return "\n\n".join(formatted_results)
 
-    def _format_result(self, agent_name: str, result: SubagentResult) -> str:
-        """Format subagent result for display"""
+    def _parse_parallel_prompt(self, prompt: str) -> list[str]:
+        """Parse parallel tasks from prompt with 'parallel:' prefix (legacy support)"""
+        lines = prompt.split("\n")
+        tasks = [line.strip() for line in lines[1:] if line.strip()]
+        return tasks
+
+    def _format_result(self, agent_name: str, result_mode: str, result: SubagentResult) -> str:
+        """Format subagent result for display based on result_mode"""
         if result.success:
             output = result.output.strip() if result.output else "[No output]"
-            return f"[{agent_name}] {output}"
+            if result_mode == "summary":
+                return f"[{agent_name}] {output}"
+            else:
+                # detailed mode
+                return f"[{agent_name}]\nOutput: {output}\nIterations: {result.iterations}\nTokens: {result.tokens_used}"
         else:
             error = result.error or "Unknown error"
             return f"[{agent_name}] Error: {error}"
@@ -291,6 +304,11 @@ class SubagentTool(ModelProviderMixin, Tool):
                 "background": {
                     "type": "boolean",
                     "description": "是否后台执行。如果为true，立即返回task_id，任务在后台运行。可用代理: " + agent_names
+                },
+                "parallel_tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "并行任务列表。如果提供，忽略prompt中的任务，改为并行执行列表中的任务。"
                 }
             },
             "required": ["prompt"]
@@ -335,4 +353,45 @@ class CheckSubagentTool(ModelProviderMixin, Tool):
         }
 
 
-__all__ = ["SubagentTool", "CheckSubagentTool"]
+class CancelSubagentTool(ModelProviderMixin, Tool):
+    """Tool for cancelling a running background subagent task"""
+
+    is_mutating = True
+    requires_approval = False
+
+    @property
+    def name(self) -> str:
+        return "cancel_subagent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "取消一个后台子代理任务。\n"
+            "参数: task_id (string, 必填) - 要取消的任务 ID\n"
+            "返回: 是否成功取消"
+        )
+
+    async def execute(self, task_id: str, **kwargs: Any) -> str:
+        """Cancel a running background subagent task"""
+        from src.tools.subagent.background_manager import get_bg_subagent_manager
+        bg_manager = get_bg_subagent_manager()
+        success = await bg_manager.cancel(task_id)
+        if success:
+            return f"Task {task_id} has been cancelled"
+        else:
+            return f"Failed to cancel task {task_id}. It may not exist or already completed."
+
+    def _get_input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "要取消的任务 ID"
+                }
+            },
+            "required": ["task_id"]
+        }
+
+
+__all__ = ["SubagentTool", "CheckSubagentTool", "CancelSubagentTool"]

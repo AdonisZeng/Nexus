@@ -3,7 +3,7 @@ from .models import SubagentConfig, SubagentResult, HookDefinition
 from .parser import SubagentParser
 from .registry import SubagentRegistry
 from .runner import SubagentRunner
-from .tool import SubagentTool, CheckSubagentTool
+from .tool import SubagentTool, CheckSubagentTool, CancelSubagentTool
 from .hooks import HookDefinition, HookResult, HookManager, HookRunner
 from .permission import PermissionEnforcer, MUTATING_TOOLS, SAFE_TOOLS
 from .parameter_validator import (
@@ -33,6 +33,7 @@ __all__ = [
     # Tools
     "SubagentTool",
     "CheckSubagentTool",
+    "CancelSubagentTool",
     # Hooks
     "HookDefinition",
     "HookResult",

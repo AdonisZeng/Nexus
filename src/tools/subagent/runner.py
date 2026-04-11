@@ -66,21 +66,24 @@ class SubagentRunner:
             if name not in ("subagent", "team")
         }
 
+        for tool_name in self.config.required_tools:
+            if tool_name in available_tools:
+                filtered.register(available_tools[tool_name])
+
         if not self.config.allowed_tools and not self.config.denied_tools:
-            # 无限制：使用完整注册表
             for name, tool in available_tools.items():
-                filtered.register(tool)
+                if name not in filtered.tools:
+                    filtered.register(tool)
             return filtered
 
         if self.config.allowed_tools:
-            # 白名单模式：只包含允许的工具
             for tool_name in self.config.allowed_tools:
-                if tool_name in available_tools:
+                if tool_name in available_tools and tool_name not in filtered.tools:
                     filtered.register(available_tools[tool_name])
         else:
             # 黑名单模式：包含所有工具，排除 denied_tools
             for name, tool in available_tools.items():
-                if name not in self.config.denied_tools:
+                if name not in self.config.denied_tools and name not in filtered.tools:
                     filtered.register(tool)
 
         return filtered
@@ -120,7 +123,12 @@ class SubagentRunner:
 当前系统时间: {current_time}
 请注意：回答涉及时间的问题时，应以该时间为准。"""
 
-        full_system_prompt = f"{time_info}\n\n{self.config.system_prompt}"
+        parts = [time_info]
+        if self.config.initial_prompt:
+            parts.append(self.config.initial_prompt.strip())
+        parts.append(self.config.system_prompt)
+
+        full_system_prompt = "\n\n".join(parts)
         context.add_system_message(full_system_prompt)
 
         # Store isolation config in context metadata

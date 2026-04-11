@@ -31,6 +31,10 @@ class SubagentConfig:
     permission_mode: str = "normal"  # "normal" 或 "read_only"
     tool_parameters: dict[str, dict[str, Any]] = field(default_factory=dict)  # 工具参数限制
     background: bool = False  # 是否后台执行
+    # 新增字段
+    result_mode: str = "detailed"  # "summary" | "detailed"，控制输出详细程度
+    required_tools: list[str] = field(default_factory=list)  # 强制包含的工具
+    initial_prompt: str = ""  # 在 system_prompt 之前注入的初始化指令
 
 
 @dataclass

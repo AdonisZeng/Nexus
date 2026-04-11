@@ -59,6 +59,17 @@ class SubagentParser:
         # Parse background
         background = bool(frontmatter.get("background", False))
 
+        # Parse result_mode
+        result_mode = frontmatter.get("result-mode", "detailed")
+        if result_mode not in ("summary", "detailed"):
+            result_mode = "detailed"
+
+        # Parse required_tools
+        required_tools = cls._parse_list_field(frontmatter.get("required-tools"))
+
+        # Parse initial_prompt
+        initial_prompt = frontmatter.get("initial-prompt", "")
+
         return SubagentConfig(
             name=name,
             description=frontmatter.get("description", ""),
@@ -76,6 +87,9 @@ class SubagentParser:
             permission_mode=permission_mode,
             tool_parameters=tool_parameters,
             background=background,
+            result_mode=result_mode,
+            required_tools=required_tools,
+            initial_prompt=initial_prompt,
         )
 
     @classmethod
