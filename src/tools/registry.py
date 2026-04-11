@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable, Optional, Type, TYPE_CHECKING
 import asyncio
+import logging
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from .schema_cleaner import SchemaCleaner
 
 if TYPE_CHECKING:
     from src.adapters.provider import ModelProvider
+
+logger = logging.getLogger("Nexus")
 
 
 class ModelProviderMixin:

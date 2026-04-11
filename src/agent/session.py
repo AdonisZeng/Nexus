@@ -121,6 +121,10 @@ class AgentSession(ModelProvider):
         from src.tools.background import get_background_manager
         self.bg_manager = get_background_manager()
 
+        # MCP Router for unified tool management
+        from src.mcp.router import MCPToolRouter
+        self.mcp_router = MCPToolRouter(mcp_client=self.mcp_client)
+
     # ──────────────────────────────────────────────
     # ModelProvider interface
     # ──────────────────────────────────────────────
@@ -178,38 +182,38 @@ class AgentSession(ModelProvider):
 
             from src.mcp.client import parse_qualified_tool_name
             from src.mcp.approval import ApprovalDecision
-            tool = None
-            try:
-                server, actual_name = parse_qualified_tool_name(tool_name)
-                if self.mcp_client.is_connected(server):
-                    decision = await self.tool_approval.check(server, actual_name, args)
-                    if decision == ApprovalDecision.DENY:
-                        result = "Tool call denied by approval policy"
-                    elif decision == ApprovalDecision.PROMPT:
-                        result = "Tool call requires user approval (not yet implemented)"
-                    else:
-                        result = await self.mcp_client.call_tool(server, actual_name, args)
-                else:
-                    tool = self.tool_registry.get(tool_name)
-            except ValueError:
-                # Not an MCP tool name
-                tool = self.tool_registry.get(tool_name)
 
-            if result is None and tool:
-                from src.tools.context import ToolContext
-                context = ToolContext(
-                    tool_name=tool_name,
-                    args=args,
-                    cwd=Path(self.cwd) if self.cwd else None,
-                    tracker=None,
-                    gate=self.tool_orchestrator.gate if self.tool_orchestrator and hasattr(tool, 'is_mutating') and tool.is_mutating else None
-                )
-                if self.tool_orchestrator:
-                    result = await self.tool_orchestrator.execute(tool, args, context)
+            is_mcp = self.mcp_router.is_mcp_tool(tool_name)
+
+            if is_mcp:
+                adapter = self.mcp_router.get_adapter(tool_name)
+                if adapter:
+                    # MCP approval check before execution via adapter
+                    try:
+                        server, actual_name = parse_qualified_tool_name(tool_name)
+                        if self.mcp_client.is_connected(server):
+                            decision = await self.tool_approval.check(server, actual_name, args)
+                            if decision == ApprovalDecision.DENY:
+                                result = "Tool call denied by approval policy"
+                            elif decision == ApprovalDecision.PROMPT:
+                                result = "Tool call requires user approval (not yet implemented)"
+                            else:
+                                context = self._make_tool_context(tool_name, args, adapter)
+                                result = await self._execute_with_context(adapter, args, context)
+                        else:
+                            context = self._make_tool_context(tool_name, args, adapter)
+                            result = await self._execute_with_context(adapter, args, context)
+                    except ValueError:
+                        result = f"Invalid MCP tool name: {tool_name}"
                 else:
-                    result = await tool.execute(**args)
-            elif result is None:
-                result = await self.tool_registry.execute(tool_name, **args)
+                    result = await self._mcp_fallback_execute(tool_name, args)
+            else:
+                tool = self.tool_registry.get(tool_name)
+                if tool:
+                    context = self._make_tool_context(tool_name, args, tool)
+                    result = await self._execute_with_context(tool, args, context)
+                else:
+                    result = await self.tool_registry.execute(tool_name, **args)
 
         except asyncio.CancelledError:
             raise
@@ -217,6 +221,53 @@ class AgentSession(ModelProvider):
             result = {"error": str(e)}
 
         return tool_call, result
+
+    async def _mcp_fallback_execute(self, tool_name: str, args: dict) -> Any:
+        """执行未注册的 MCP 工具（回退路径），含 MCP approval 检查"""
+        from src.mcp.client import parse_qualified_tool_name
+        try:
+            server, actual_name = parse_qualified_tool_name(tool_name)
+        except ValueError:
+            return f"Invalid MCP tool name: {tool_name}"
+
+        if self.mcp_client.is_connected(server):
+            decision = await self.tool_approval.check(server, actual_name, args)
+            if decision == ApprovalDecision.DENY:
+                return "Tool call denied by approval policy"
+            if decision == ApprovalDecision.PROMPT:
+                return "Tool call requires user approval (not yet implemented)"
+            return await self.mcp_client.call_tool(server, actual_name, args)
+
+        # 服务器未连接：尝试查找同名本地工具（使用 actual_name 而非完整限定名）
+        tool = self.tool_registry.get(actual_name)
+        if tool:
+            context = self._make_tool_context(tool_name, args, tool)
+            return await self._execute_with_context(tool, args, context)
+        return f"MCP server '{server}' is not connected and tool not found"
+
+    def _make_tool_context(self, tool_name: str, args: dict, tool_or_adapter) -> "ToolContext":
+        """创建 ToolContext 的辅助方法"""
+        from src.tools.context import ToolContext
+        is_mutating = getattr(tool_or_adapter, 'is_mutating', False)
+        gate = self.tool_orchestrator.gate if self.tool_orchestrator and is_mutating else None
+        return ToolContext(
+            tool_name=tool_name,
+            args=args,
+            cwd=Path(self.cwd) if self.cwd else None,
+            tracker=None,
+            gate=gate,
+        )
+
+    async def _execute_with_context(
+        self,
+        tool,
+        args: dict,
+        context: "ToolContext",
+    ) -> Any:
+        """通过 orchestrator 或直接执行工具"""
+        if self.tool_orchestrator:
+            return await self.tool_orchestrator.execute(tool, args, context)
+        return await tool.execute(**args)
 
     async def _execute_tools_parallel(
         self,

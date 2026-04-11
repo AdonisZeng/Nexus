@@ -29,6 +29,11 @@ SAFE_TOOLS = {
     "load_skill",
 }
 
+# Tool name prefixes for risk classification (shared across MCP adapter and capability gate)
+HIGH_RISK_PREFIXES = ("delete", "remove", "drop", "shutdown", "destroy")
+WRITE_PREFIXES = ("create", "write", "update", "edit", "modify", "add")
+READ_PREFIXES = ("read", "list", "get", "show", "search", "query", "inspect")
+
 
 class PermissionRegistry:
     """Registry mapping tools to permission categories.
