@@ -1,6 +1,10 @@
 """Tool dependency analyzer for parallel execution"""
-from typing import List, Set, Dict
+from typing import List, Set, Dict, Optional, TYPE_CHECKING
+
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from src.tools.registry import ToolRegistry
 
 
 @dataclass
@@ -20,14 +24,33 @@ class DependencyAnalyzer:
     支持两种模式：
     1. 显式依赖：如果 tool_calls 中包含 depends_on 字段，使用拓扑排序
     2. 隐式依赖：否则使用读/写工具类型分组
+
+    使用 Tool.concurrency_category 属性进行动态分类，
+    替代之前的硬编码字符串集合。
     """
 
-    # 读工具 - 可以并行
-    READ_TOOLS = {'file_read', 'search', 'list_dir', 'grep', 'read', 'glob', 'find', 'stat', 'read_file', 'dir', 'walk'}
-    # 写工具 - 需要串行
-    WRITE_TOOLS = {'file_write', 'file_patch', 'shell', 'bash', 'write', 'patch', 'edit', 'delete', 'rm', 'mkdir', 'create_directory', 'remove_directory'}
-    # Mutating tools that should be serialized
-    MUTATING_TOOLS = {'file_write', 'file_patch', 'shell', 'bash', 'write', 'patch', 'edit', 'delete', 'rm', 'mkdir', 'move', 'rename'}
+    def __init__(self, tool_registry: Optional["ToolRegistry"] = None):
+        """Initialize with optional tool registry for dynamic classification.
+
+        Args:
+            tool_registry: Optional registry to query tool properties for classification
+        """
+        self._tool_registry = tool_registry
+        self._classification_cache: Dict[str, str] = {}
+
+    # 回退用的读工具集合（用于未知工具的启发式判断）
+    _READ_TOOLS_FALLBACK = frozenset({
+        'file_read', 'search', 'list_dir', 'grep', 'read', 'glob',
+        'find', 'stat', 'read_file', 'dir', 'walk', 'check_background',
+        'check_subagent', 'todo_read', 'get_tasks', 'get_teams',
+    })
+    # 回退用的写工具集合
+    _WRITE_TOOLS_FALLBACK = frozenset({
+        'file_write', 'file_patch', 'shell', 'bash', 'write', 'patch',
+        'edit', 'delete', 'rm', 'mkdir', 'move', 'rename',
+        'create_directory', 'remove_directory', 'background_run',
+        'cancel_subagent', 'todo_write', 'create_task', 'update_task',
+    })
 
     def analyze(self, tool_calls: List[dict]) -> List[List[dict]]:
         """
@@ -53,20 +76,76 @@ class DependencyAnalyzer:
         else:
             return self._analyze_by_type(tool_calls)
 
+    def _get_tool_classification(self, tool_name: str) -> str:
+        """Get concurrency classification for a tool.
+
+        Uses the tool's concurrency_category property if available,
+        falls back to heuristics for unknown tools.
+        Results are cached for repeated lookups.
+
+        Args:
+            tool_name: Name of the tool
+
+        Returns:
+            'read', 'write', or 'other'
+        """
+        # Check cache first
+        if tool_name in self._classification_cache:
+            return self._classification_cache[tool_name]
+
+        # Try to get tool from registry
+        tool = None
+        if self._tool_registry:
+            tool = self._tool_registry.get(tool_name)
+
+        # Use tool property if available
+        if tool and hasattr(tool, 'concurrency_category'):
+            classification = tool.concurrency_category
+        else:
+            # Fallback to heuristics for unknown tools
+            classification = self._classify_unknown_tool(tool_name)
+
+        # Cache the result
+        self._classification_cache[tool_name] = classification
+        return classification
+
+    def _classify_unknown_tool(self, tool_name: str) -> str:
+        """Classify unknown tools based on name heuristics.
+
+        Args:
+            tool_name: Tool name to classify
+
+        Returns:
+            'read', 'write', or 'other'
+        """
+        # Check against fallback sets
+        if tool_name in self._READ_TOOLS_FALLBACK:
+            return "read"
+        if tool_name in self._WRITE_TOOLS_FALLBACK:
+            return "write"
+
+        # Unknown tool - be conservative and treat as write
+        return "other"
+
     def _analyze_by_type(self, tool_calls: List[dict]) -> List[List[dict]]:
-        """按工具类型分组（读可以并行，写需要串行）"""
+        """按工具类型分组（读可以并行，写需要串行）
+
+        使用 Tool.concurrency_category 属性进行动态分类。
+        """
         read_calls = []
         write_calls = []
         other_calls = []
 
         for tc in tool_calls:
             tool_name = tc.get("name", "")
-            if tool_name in self.READ_TOOLS:
+            classification = self._get_tool_classification(tool_name)
+
+            if classification == "read":
                 read_calls.append(tc)
-            elif tool_name in self.WRITE_TOOLS or tool_name in self.MUTATING_TOOLS:
+            elif classification == "write":
                 write_calls.append(tc)
             else:
-                # 未知工具类型，视为需要串行
+                # 'other' - 未知或保守分类，视为需要串行
                 other_calls.append(tc)
 
         batches = []
@@ -133,4 +212,7 @@ class DependencyAnalyzer:
             return True
 
         # 如果都是读工具，可以并行
-        return all(tc.get("name", "") in self.READ_TOOLS for tc in tool_calls)
+        return all(
+            self._get_tool_classification(tc.get("name", "")) == "read"
+            for tc in tool_calls
+        )

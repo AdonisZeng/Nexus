@@ -48,6 +48,19 @@ from .micro_compactor import (
     micro_compact_messages,
     get_compactor,
 )
+from .tool_use_normalizer import (
+    ToolUseNormalizer,
+    ToolUseNormalizerConfig,
+    normalize_tool_uses,
+    get_normalizer,
+    ORPHANED_RESULT_PLACEHOLDER,
+)
+from .message_merger import (
+    MessageMerger,
+    MessageMergerConfig,
+    merge_consecutive_messages,
+    get_merger,
+)
 from .consolidator import MemoryConsolidator, get_consolidator
 from .system_prompt import (
     SystemPromptBuilder,
@@ -88,6 +101,17 @@ __all__ = [
     "MicroCompactConfig",
     "micro_compact_messages",
     "get_compactor",
+    # Tool Use Normalizer (orphan protection)
+    "ToolUseNormalizer",
+    "ToolUseNormalizerConfig",
+    "normalize_tool_uses",
+    "get_normalizer",
+    "ORPHANED_RESULT_PLACEHOLDER",
+    # Message Merger (lightweight merging)
+    "MessageMerger",
+    "MessageMergerConfig",
+    "merge_consecutive_messages",
+    "get_merger",
     # Consolidation
     "MemoryConsolidator",
     "get_consolidator",

@@ -50,6 +50,28 @@ class Tool(ABC):
         """Whether this tool requires user approval before execution"""
         return False
 
+    @property
+    def is_concurrent_safe(self) -> bool:
+        """Whether this tool can safely execute in parallel with other read tools.
+
+        Read-only tools (is_mutating=False) are generally concurrent safe.
+        Mutating tools may have internal state that prevents parallel execution.
+        """
+        return not self.is_mutating
+
+    @property
+    def concurrency_category(self) -> str:
+        """Category for dependency analysis: 'read', 'write', or 'other'.
+
+        Used by DependencyAnalyzer to group tools for parallel execution.
+        - 'read': Safe to run in parallel with other read tools
+        - 'write': Must be serialized with other write/other tools
+        - 'other': Unknown classification, treated as write for safety
+        """
+        if self.is_mutating:
+            return "write"
+        return "read"
+
     @abstractmethod
     async def execute(self, **kwargs) -> Any:
         """Execute the tool"""

@@ -102,6 +102,9 @@ class AgentSession(ModelProvider):
         self.mcp_client = MCPClient()
         self.tool_orchestrator = None  # set by caller after construction
 
+        # Reusable components (initialized lazily)
+        self._dependency_analyzer = None
+
         # Conversation state
         self.messages: list[dict] = []
         self.system_prompt: Optional[str] = None
@@ -226,8 +229,10 @@ class AgentSession(ModelProvider):
             if not tc.get("id"):
                 tc["id"] = f"auto_{idx}_{tc.get('name', 'unknown')}"
 
-        analyzer = DependencyAnalyzer()
-        batches = analyzer.analyze(tool_calls)
+        # Reuse analyzer instance with cache across calls
+        if self._dependency_analyzer is None:
+            self._dependency_analyzer = DependencyAnalyzer(self.tool_registry)
+        batches = self._dependency_analyzer.analyze(tool_calls)
         results = []
 
         for batch in batches:
@@ -325,6 +330,10 @@ class AgentSession(ModelProvider):
 
         # Context compression check
         if len(self.messages) > 2:
+            # Lightweight: merge consecutive same-role messages before compaction
+            from src.context.message_merger import merge_consecutive_messages
+            merge_consecutive_messages(self.messages)
+
             # Tier-2: micro-compact older tool results before threshold check
             from src.context.micro_compactor import micro_compact_messages
             micro_compact_messages(self.messages, keep_recent=3)
@@ -450,6 +459,10 @@ class AgentSession(ModelProvider):
                         "content": preview,
                         "tool_call_id": tool_call.get("id"),
                     })
+
+                # Normalize tool uses: detect orphaned tool_use blocks and insert placeholders
+                from src.context.tool_use_normalizer import normalize_tool_uses
+                normalize_tool_uses(self.messages)
 
                 # Nag Reminder (skip in plan/tasks mode)
                 if self.plan_mode or self.tasks_mode:
