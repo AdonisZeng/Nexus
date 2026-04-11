@@ -1,5 +1,5 @@
 """Tool orchestrator for managing tool execution lifecycle."""
-from typing import Awaitable, Callable, Optional, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Optional, TYPE_CHECKING
 
 from .context import ToolContext, ToolGate
 from .registry import Tool

@@ -45,19 +45,21 @@ python build.py
 
 ```
 main.py
-    ├── bootstrap.py          # PyInstaller runtime init
-    ├── config.py             # Config loading
-    └── cli/main.py (NexusCLI) # Main orchestrator
-            ├── agent/session.py (AgentSession)  # Task execution
-            │       ├── adapters/                # LLM providers (self-registering)
-            │       ├── tools/orchestrator.py    # Tool lifecycle
-            │       │       └── tools/registry.py # Tool registry
-            │       ├── mcp/client.py            # MCP protocol client
-            │       └── context/                 # Memory & compression
-            ├── commands/                       # Slash commands
-            ├── skills/                         # Dynamic skill loader
-            └── team/                           # Multi-agent collaboration
+    ├── src/bootstrap.py     # PyInstaller runtime init (exe only)
+    ├── src/config.py         # Config loading
+    └── src/cli/main.py (NexusCLI) # Main orchestrator
+            ├── src/agent/session.py (AgentSession)  # Task execution
+            │       ├── src/adapters/                # LLM providers (self-registering)
+            │       ├── src/tools/orchestrator.py    # Tool lifecycle
+            │       │       └── src/tools/registry.py # Tool registry
+            │       ├── src/mcp/client.py            # MCP protocol client
+            │       └── src/context/                 # Memory & compression
+            ├── src/commands/                       # Slash commands
+            ├── src/skills/                         # Dynamic skill loader
+            └── src/team/                           # Multi-agent collaboration
 ```
+
+**Note:** `src/bootstrap.py` is only imported and executed in PyInstaller frozen (exe) mode. During development, only `src/config.py`, `src/cli/main.py`, `src/utils`, and `src/adapters` are loaded.
 
 ### Core Modules
 

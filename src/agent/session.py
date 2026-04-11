@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from collections import deque
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 from src.adapters.provider import ModelProvider
 from src.mcp import MCPClient
