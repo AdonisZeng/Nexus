@@ -7,6 +7,7 @@ from enum import Enum
 
 from .registry import Tool
 from .models import FilePatchArgs
+from .file import _resolve_path
 
 
 class PatchOperationType(Enum):
@@ -31,6 +32,7 @@ class PatchOperation:
     file_path: str
     content: Optional[list[str]] = None
     hunks: Optional[list[Hunk]] = None
+    resolved_path: Optional[Path] = None  # Resolved path with worktree_root/cwd
 
 
 class FilePatchTool(Tool):
@@ -55,11 +57,19 @@ class FilePatchTool(Tool):
     def _get_input_schema(self) -> dict:
         return FilePatchArgs.model_json_schema()
 
-    async def execute(self, patch: str, **kwargs) -> str:
+    async def execute(
+        self,
+        patch: str,
+        worktree_root: Optional[str] = None,
+        cwd: Optional[str] = None,
+        **kwargs
+    ) -> str:
         """
         Execute patch operations.
 
         @param patch The patch text in the specified format
+        @param worktree_root Worktree root for path resolution
+        @param cwd Fallback current working directory
         @return Success message or error description
         """
         # Check protected paths
@@ -68,13 +78,18 @@ class FilePatchTool(Tool):
 
         paths = re.findall(r'\*\*\*\s*(?:Add|Update|Delete)\s+File:\s*([^\n]+)', patch)
         for p in paths:
-            if protected_paths.is_protected(p.strip()):
-                return protected_paths.get_error_message(p.strip(), "patch")
+            resolved_path = _resolve_path(p.strip(), worktree_root, cwd)
+            if protected_paths.is_protected(str(resolved_path)):
+                return protected_paths.get_error_message(str(resolved_path), "patch")
 
         try:
             operations = self._parse_patch(patch)
         except ValueError as e:
             return f"Parse error: {str(e)}"
+
+        # Resolve paths for all operations
+        for op in operations:
+            op.resolved_path = _resolve_path(op.file_path, worktree_root, cwd)
 
         # Validate all operations first
         validation_errors = []
@@ -215,7 +230,7 @@ class FilePatchTool(Tool):
         @param op The operation to validate
         @return Error message if validation fails, None if successful
         """
-        path = Path(op.file_path)
+        path = op.resolved_path or Path(op.file_path)
 
         if op.op_type == PatchOperationType.ADD:
             if path.exists():
@@ -297,7 +312,7 @@ class FilePatchTool(Tool):
         @param rollback_files Dictionary to store rollback information
         @raises Exception If application fails
         """
-        path = Path(op.file_path)
+        path = op.resolved_path or Path(op.file_path)
 
         if op.op_type == PatchOperationType.ADD:
             # Store for rollback (file didn't exist)
@@ -365,7 +380,7 @@ class FilePatchTool(Tool):
         @param rollback_files Dictionary with rollback information
         """
         for op in reversed(operations):
-            path = Path(op.file_path)
+            path = op.resolved_path or Path(op.file_path)
             original_content = rollback_files.get(op.file_path)
 
             try:

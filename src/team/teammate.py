@@ -406,6 +406,11 @@ class Teammate:
             logger.warning(f"[Teammate:{self.name}] Unknown tool: {tool_name}")
             return f"Error: Unknown tool '{tool_name}'"
 
+        # Inject worktree isolation context for path-accepting tools
+        if self.worktree_path:
+            tool_args["worktree_root"] = self.worktree_path
+            tool_args["cwd"] = self.worktree_path
+
         if hasattr(tool, "execute"):
             if hasattr(tool, "_is_protocol_tool") and tool._is_protocol_tool:
                 tool_args["team_name"] = self.team_name

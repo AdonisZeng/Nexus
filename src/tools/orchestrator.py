@@ -120,7 +120,9 @@ class ToolOrchestrator:
                 await context.gate.wait(holder_id=tool.name)
                 gate_acquired = True
 
-            # Step 3: Execute the tool
+            # Step 3: Execute the tool (inject worktree_root if not already provided)
+            if context.worktree_root and "worktree_root" not in args:
+                args["worktree_root"] = str(context.worktree_root)
             result = await tool.execute(**args)
 
             # Step 4: Post-execution hook

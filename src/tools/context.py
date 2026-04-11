@@ -20,6 +20,7 @@ class ToolContext:
         tool_name: Name of the tool being executed
         args: Arguments passed to the tool
         cwd: Current working directory for execution
+        worktree_root: Root directory for worktree isolation (takes precedence over cwd for path resolution)
         tracker: Optional execution tracker for monitoring progress
         gate: Optional gate for controlling mutating operations
         metadata: Additional metadata for the execution context
@@ -27,6 +28,7 @@ class ToolContext:
     tool_name: str
     args: dict[str, Any] = field(default_factory=dict)
     cwd: Path = field(default_factory=Path.cwd)
+    worktree_root: Optional[Path] = None
     tracker: Optional[Any] = None
     gate: Optional["ToolGate"] = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -44,6 +46,7 @@ class ToolContext:
             tool_name=self.tool_name,
             args=self.args,
             cwd=self.cwd,
+            worktree_root=self.worktree_root,
             tracker=self.tracker,
             gate=gate,
             metadata=self.metadata.copy()

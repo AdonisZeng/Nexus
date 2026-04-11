@@ -1,6 +1,7 @@
 """Task Board - Autonomous task management system for Agent Teams"""
 import json
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,9 +31,12 @@ class Task:
     owner: Optional[str] = None
     blocked_by: list = field(default_factory=list)
     spec_file: Optional[str] = None  # Path to shared spec file (e.g., design.md in master root)
-    created_at: float = field(default_factory=lambda: __import__('time').time())
+    created_at: float = field(default_factory=lambda: time.time())
     worktree_name: Optional[str] = None
     worktree_path: Optional[str] = None
+    closeout_action: Optional[str] = None  # "kept" | "removed"
+    closeout_reason: str = ""
+    closeout_at: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +50,9 @@ class Task:
             "createdAt": self.created_at,
             "worktreeName": self.worktree_name,
             "worktreePath": self.worktree_path,
+            "closeoutAction": self.closeout_action,
+            "closeoutReason": self.closeout_reason,
+            "closeoutAt": self.closeout_at,
         }
 
     @classmethod
@@ -58,9 +65,12 @@ class Task:
             owner=data.get("owner"),
             blocked_by=data.get("blockedBy", []),
             spec_file=data.get("specFile"),
-            created_at=data.get("createdAt", __import__('time').time()),
+            created_at=data.get("createdAt", time.time()),
             worktree_name=data.get("worktreeName"),
             worktree_path=data.get("worktreePath"),
+            closeout_action=data.get("closeoutAction"),
+            closeout_reason=data.get("closeoutReason", ""),
+            closeout_at=data.get("closeoutAt"),
         )
 
 
@@ -71,12 +81,13 @@ class TaskBoard:
     Tasks can be claimed by teammates dynamically.
     """
 
-    def __init__(self, team_name: str, base_dir: Optional[Path] = None):
+    def __init__(self, team_name: str, base_dir: Optional[Path] = None, event_bus=None):
         """Initialize task board
 
         Args:
             team_name: Name of the team
             base_dir: Base directory for task storage (defaults to ~/.nexus/teams/<team_name>/tasks/)
+            event_bus: Optional EventBus instance for subscribing to worktree events
         """
         self.team_name = team_name
         if base_dir:
@@ -86,6 +97,79 @@ class TaskBoard:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._next_id = self._load_max_id() + 1
+        self._event_bus = event_bus
+        self._subscribe_to_events()
+
+    def _subscribe_to_events(self) -> None:
+        """Subscribe to worktree-related events"""
+        if not self._event_bus:
+            return
+        self._event_bus.subscribe("worktree_task_bound", self._on_worktree_bound)
+        self._event_bus.subscribe("worktree_removed", self._on_worktree_removed)
+        self._event_bus.subscribe("worktree_kept", self._on_worktree_kept)
+        self._event_bus.subscribe("task_completed", self._on_task_completed)
+
+    def _on_worktree_bound(self, event_type: str, task_id: Optional[int], worktree_name: Optional[str], metadata: dict) -> None:
+        """Handle worktree_task_bound event"""
+        if task_id is None:
+            return
+        worktree_path = metadata.get("worktree_path", "")
+        self.bind_worktree(task_id, worktree_name, worktree_path)
+
+    def _on_worktree_removed(self, event_type: str, task_id: Optional[int], worktree_name: Optional[str], metadata: dict) -> None:
+        """Handle worktree_removed event"""
+        if task_id is None:
+            return
+        task = self.get_task(task_id)
+        if task and task.worktree_name == worktree_name:
+            task.worktree_name = None
+            task.worktree_path = None
+            self._save_task(task)
+            logger.info(f"[TaskBoard] Task #{task_id} unbound from removed worktree '{worktree_name}'")
+
+    def _on_worktree_kept(self, event_type: str, task_id: Optional[int], worktree_name: Optional[str], metadata: dict) -> None:
+        """Handle worktree_kept event"""
+        if task_id is None:
+            return
+        reason = metadata.get("reason", "") if metadata else ""
+        self.record_closeout(task_id, "kept", reason)
+
+    def _on_task_completed(self, event_type: str, task_id: Optional[int], worktree_name: Optional[str], metadata: dict) -> None:
+        """Handle task_completed event (from worktree closeout)"""
+        if task_id is None:
+            return
+        self.complete(task_id)
+
+    def _save_task(self, task: Task) -> None:
+        """Save task to disk"""
+        path = self._get_task_path(task.id)
+        path.write_text(json.dumps(task.to_dict(), indent=2))
+
+    def record_closeout(self, task_id: int, action: str, reason: str = "") -> bool:
+        """Record a closeout action for a task
+
+        Args:
+            task_id: Task ID
+            action: Closeout action ("kept" or "removed")
+            reason: Optional reason for closeout
+
+        Returns:
+            True if successfully recorded, False otherwise
+        """
+        with self._lock:
+            task = self.get_task(task_id)
+            if not task:
+                logger.warning(f"Cannot record closeout: Task #{task_id} not found")
+                return False
+
+            task.closeout_action = action
+            task.closeout_reason = reason
+            task.closeout_at = time.time()
+
+            path = self._get_task_path(task_id)
+            path.write_text(json.dumps(task.to_dict(), indent=2))
+            logger.info(f"[TaskBoard] Task #{task_id} recorded closeout: action={action}, reason={reason}")
+            return True
 
     def _load_max_id(self) -> int:
         """Load the maximum task ID from existing files"""

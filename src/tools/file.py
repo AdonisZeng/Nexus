@@ -7,6 +7,30 @@ from .registry import Tool
 from .models import FileReadArgs, SearchArgs
 
 
+def _resolve_path(file_path: str, worktree_root: Optional[str] = None, cwd: Optional[str] = None) -> Path:
+    """Resolve a file path against worktree_root or cwd.
+
+    Relative paths are resolved against worktree_root (preferred) or cwd.
+    Absolute paths are returned as-is.
+
+    Args:
+        file_path: The file path to resolve
+        worktree_root: Worktree root directory for isolation
+        cwd: Fallback current working directory
+
+    Returns:
+        Resolved Path object
+    """
+    path = Path(file_path)
+    if path.is_absolute():
+        return path
+    if worktree_root:
+        return Path(worktree_root) / path
+    if cwd:
+        return Path(cwd) / path
+    return path
+
+
 class FileReadTool(Tool):
     """Read file contents"""
 
@@ -75,6 +99,8 @@ class FileReadTool(Tool):
         limit: int = 2000,
         mode: str = "slice",
         anchor_line: Optional[int] = None,
+        worktree_root: Optional[str] = None,
+        cwd: Optional[str] = None,
         **kwargs
     ) -> str:
         """Read file contents with pagination and mode support"""
@@ -87,7 +113,7 @@ class FileReadTool(Tool):
             anchor_line=anchor_line
         )
 
-        path = Path(args.file_path)
+        path = _resolve_path(args.file_path, worktree_root, cwd)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {args.file_path}")
 
@@ -128,21 +154,30 @@ class FileWriteTool(Tool):
     def description(self) -> str:
         return "[Legacy] Write content to a file. Recommended: use file_patch instead. Creates the file if it doesn't exist. Input: file_path (string, required), content (string, required)"
 
-    async def execute(self, file_path: str, content: str, **kwargs) -> str:
+    async def execute(
+        self,
+        file_path: str,
+        content: str,
+        worktree_root: Optional[str] = None,
+        cwd: Optional[str] = None,
+        **kwargs
+    ) -> str:
         """Write content to file"""
         from src.tools.protected_paths import protected_paths
 
-        if protected_paths.is_protected(file_path):
-            worktree_path = protected_paths.get_current_worktree_path()
-            return protected_paths.get_error_message(file_path, "write", worktree_path)
+        resolved_path = _resolve_path(file_path, worktree_root, cwd)
+        resolved_str = str(resolved_path)
 
-        path = Path(file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if protected_paths.is_protected(resolved_str):
+            worktree_path = protected_paths.get_current_worktree_path()
+            return protected_paths.get_error_message(resolved_str, "write", worktree_path)
+
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
-            lambda: path.write_text(content, encoding="utf-8")
+            lambda: resolved_path.write_text(content, encoding="utf-8")
         )
         return f"Successfully wrote to {file_path}"
 

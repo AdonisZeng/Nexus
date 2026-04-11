@@ -1,9 +1,13 @@
 """Event bus module - Event logging and querying for team activities"""
 import json
+import threading
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from .database import Database
+from src.utils import get_logger
+
+logger = get_logger("team.event_bus")
 
 
 class EventBus:
@@ -17,6 +21,8 @@ class EventBus:
         @param db_path Optional custom database path
         """
         self._db = Database(team_name, db_path)
+        self._subscriptions: dict[str, list[Callable]] = {}
+        self._lock = threading.Lock()
 
     def emit(
         self,
@@ -26,7 +32,7 @@ class EventBus:
         **kwargs
     ) -> int:
         """
-        @brief Record an event
+        @brief Record an event and notify subscribers
 
         @param event_type Type of the event
         @param task_id Associated task ID
@@ -35,12 +41,45 @@ class EventBus:
         @return ID of the inserted event
         """
         metadata = kwargs if kwargs else None
-        return self._db.insert_event(
+        event_id = self._db.insert_event(
             event_type=event_type,
             task_id=task_id,
             worktree_name=worktree_name,
             metadata=metadata,
         )
+        self._notify(event_type, task_id, worktree_name, kwargs)
+        return event_id
+
+    def subscribe(self, event_type: str, callback: Callable) -> None:
+        """
+        @brief Subscribe to an event type
+
+        @param event_type Type of event to subscribe to
+        @param callback Function to call when event is emitted. Signature: (event_type, task_id, worktree_name, metadata)
+        """
+        with self._lock:
+            if event_type not in self._subscriptions:
+                self._subscriptions[event_type] = []
+            self._subscriptions[event_type].append(callback)
+
+    def _notify(self, event_type: str, task_id: Optional[int], worktree_name: Optional[str], metadata: dict) -> None:
+        """
+        @brief Notify subscribers of an event
+
+        @param event_type Type of event
+        @param task_id Associated task ID
+        @param worktree_name Associated worktree name
+        @param metadata Additional metadata
+        """
+        callbacks = []
+        with self._lock:
+            callbacks = list(self._subscriptions.get(event_type, []))
+
+        for callback in callbacks:
+            try:
+                callback(event_type, task_id, worktree_name, metadata)
+            except Exception as e:
+                logger.error(f"[EventBus] Subscriber error for {event_type}: {e}")
 
     def list_recent(
         self,

@@ -209,13 +209,18 @@ class WorktreeManager:
                 shutil.rmtree(worktree_path, ignore_errors=True)
             return False, f"Failed to create worktree: {stderr or stdout}"
 
+        now = time.time()
         worktree_info = {
             "name": name,
             "path": str(worktree_path),
             "base_ref": base_ref,
             "task_id": task_id,
-            "created_at": time.time(),
+            "created_at": now,
             "removed_at": None,
+            "status": "active",
+            "last_entered_at": None,
+            "last_command_at": None,
+            "last_command_preview": None,
         }
 
         index["worktrees"][name] = worktree_info
@@ -255,6 +260,7 @@ class WorktreeManager:
             event_type="worktree_task_bound",
             task_id=task_id,
             worktree_name=name,
+            worktree_path=index["worktrees"][name]["path"],
         )
 
         return True, f"Task {task_id} bound to worktree '{name}'"
@@ -300,7 +306,8 @@ class WorktreeManager:
         if index["worktrees"][name].get("removed_at"):
             return False, f"Worktree '{name}' has been removed"
 
-        worktree_path = Path(index["worktrees"][name]["path"])
+        worktree_info = index["worktrees"][name]
+        worktree_path = Path(worktree_info["path"])
 
         if not worktree_path.exists():
             return False, f"Worktree path {worktree_path} does not exist"
@@ -310,6 +317,13 @@ class WorktreeManager:
             return False, f"Command '{cmd_lower}' is not allowed for safety reasons"
 
         try:
+            self._event_bus.emit(
+                event_type="worktree_command_executed",
+                task_id=worktree_info.get("task_id"),
+                worktree_name=name,
+                command_preview=command[:120],
+            )
+
             result = subprocess.run(
                 command,
                 shell=True,
@@ -319,6 +333,12 @@ class WorktreeManager:
                 errors='replace',
                 timeout=300,
             )
+
+            now = time.time()
+            worktree_info["last_command_at"] = now
+            worktree_info["last_command_preview"] = command[:120]
+            self._save_index(index)
+
             output = result.stdout + ("\n" + result.stderr if result.stderr else "")
             return result.returncode == 0, output
         except subprocess.TimeoutExpired:
@@ -365,7 +385,9 @@ class WorktreeManager:
             logger.warning(f"[WorktreeManager] Failed to remove worktree '{name}': {stderr or stdout}")
             return False, f"Failed to remove worktree: {stderr or stdout}"
 
-        worktree_info["removed_at"] = time.time()
+        now = time.time()
+        worktree_info["removed_at"] = now
+        worktree_info["status"] = "removed"
         self._save_index(index)
 
         self._event_bus.emit(
@@ -394,7 +416,10 @@ class WorktreeManager:
                 "task_id": info.get("task_id"),
                 "created_at": info.get("created_at"),
                 "removed_at": info.get("removed_at"),
-                "status": "removed" if info.get("removed_at") else "active",
+                "status": info.get("status", "removed" if info.get("removed_at") else "active"),
+                "last_entered_at": info.get("last_entered_at"),
+                "last_command_at": info.get("last_command_at"),
+                "last_command_preview": info.get("last_command_preview"),
             }
             worktrees.append(worktree_entry)
 
@@ -420,5 +445,165 @@ class WorktreeManager:
             "task_id": info.get("task_id"),
             "created_at": info.get("created_at"),
             "removed_at": info.get("removed_at"),
-            "status": "removed" if info.get("removed_at") else "active",
+            "status": info.get("status", "removed" if info.get("removed_at") else "active"),
+            "last_entered_at": info.get("last_entered_at"),
+            "last_command_at": info.get("last_command_at"),
+            "last_command_preview": info.get("last_command_preview"),
         }
+
+    def status(self, name: str) -> tuple[bool, str]:
+        """
+        @brief Get git status for a worktree
+
+        @param name Worktree name
+        @return Tuple of (success, status_message)
+        """
+        index = self._ensure_index()
+
+        if name not in index.get("worktrees", {}):
+            return False, f"Worktree '{name}' does not exist"
+
+        if index["worktrees"][name].get("removed_at"):
+            return False, f"Worktree '{name}' has been removed"
+
+        worktree_info = index["worktrees"][name]
+        worktree_path = Path(worktree_info["path"])
+
+        if not worktree_path.exists():
+            return False, f"Worktree path {worktree_path} does not exist"
+
+        code, stdout, stderr = self._run_git([
+            "status", "--short", "--branch",
+        ])
+
+        if code != 0:
+            return False, f"Failed to get status: {stderr or stdout}"
+
+        output = stdout or "(clean)"
+        self._event_bus.emit(
+            event_type="worktree_status_checked",
+            task_id=worktree_info.get("task_id"),
+            worktree_name=name,
+        )
+        return True, output
+
+    def enter(self, name: str) -> tuple[bool, str]:
+        """
+        @brief Record entering a worktree for work
+
+        @param name Worktree name
+        @return Tuple of (success, message)
+        """
+        index = self._ensure_index()
+
+        if name not in index.get("worktrees", {}):
+            return False, f"Worktree '{name}' does not exist"
+
+        worktree_info = index["worktrees"][name]
+        if worktree_info.get("removed_at"):
+            return False, f"Worktree '{name}' has been removed"
+
+        now = time.time()
+        worktree_info["last_entered_at"] = now
+        self._save_index(index)
+
+        self._event_bus.emit(
+            event_type="worktree_entered",
+            task_id=worktree_info.get("task_id"),
+            worktree_name=name,
+        )
+
+        logger.info(f"[WorktreeManager] Entered worktree '{name}'")
+        return True, f"Entered worktree '{name}'"
+
+    def keep(self, name: str, reason: str = "") -> tuple[bool, str]:
+        """
+        @brief Keep a worktree without removing it (closeout action)
+
+        @param name Worktree name
+        @param reason Optional reason for keeping
+        @return Tuple of (success, message)
+        """
+        logger.info(f"[WorktreeManager] Keeping worktree '{name}' (reason={reason})")
+
+        index = self._ensure_index()
+
+        if name not in index.get("worktrees", {}):
+            return False, f"Worktree '{name}' does not exist"
+
+        worktree_info = index["worktrees"][name]
+        if worktree_info.get("removed_at"):
+            return False, f"Worktree '{name}' has already been removed"
+
+        now = time.time()
+        worktree_info["status"] = "kept"
+        worktree_info["kept_at"] = now
+        worktree_info["closeout_reason"] = reason
+        self._save_index(index)
+
+        self._event_bus.emit(
+            event_type="worktree_kept",
+            task_id=worktree_info.get("task_id"),
+            worktree_name=name,
+            reason=reason,
+        )
+
+        logger.info(f"[WorktreeManager] SUCCESS: Kept worktree '{name}'")
+        return True, f"Worktree '{name}' kept (files preserved at {worktree_info['path']})"
+
+    def closeout(
+        self,
+        name: str,
+        action: str,
+        reason: str = "",
+        force: bool = False,
+        complete_task: bool = False,
+    ) -> tuple[bool, str]:
+        """
+        @brief Closeout a worktree with keep or remove action
+
+        @param name Worktree name
+        @param action Either "keep" or "remove"
+        @param reason Optional reason
+        @param force Force remove even with uncommitted changes
+        @param complete_task Also mark the bound task as completed
+        @return Tuple of (success, message)
+        """
+        if action not in ("keep", "remove"):
+            return False, "Action must be 'keep' or 'remove'"
+
+        logger.info(f"[WorktreeManager] Closeout worktree '{name}' action={action} force={force} complete_task={complete_task}")
+
+        if action == "keep":
+            success, msg = self.keep(name, reason)
+            if success and complete_task:
+                index = self._ensure_index()
+                worktree_info = index["worktrees"].get(name, {})
+                task_id = worktree_info.get("task_id")
+                self._event_bus.emit(
+                    event_type="task_completed",
+                    task_id=task_id,
+                    worktree_name=name,
+                )
+            return success, msg
+
+        # action == "remove"
+        success, msg = self.remove(name, force)
+        if success:
+            if complete_task:
+                index = self._ensure_index()
+                worktree_info = index["worktrees"].get(name, {})
+                task_id = worktree_info.get("task_id")
+                self._event_bus.emit(
+                    event_type="task_completed",
+                    task_id=task_id,
+                    worktree_name=name,
+                )
+            self._event_bus.emit(
+                event_type="worktree_closeout",
+                task_id=None,
+                worktree_name=name,
+                action="remove",
+                reason=reason,
+            )
+        return success, msg
