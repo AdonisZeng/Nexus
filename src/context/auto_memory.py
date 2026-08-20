@@ -61,7 +61,7 @@ class AutoMemoryManager:
 
     def __init__(self, memory_dir: Optional[Path] = None):
         if memory_dir is None:
-            from .core import get_user_memory_dir
+            from .memory import get_user_memory_dir
             memory_dir = get_user_memory_dir()
 
         self.memory_dir = memory_dir

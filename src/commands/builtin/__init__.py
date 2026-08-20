@@ -1,18 +1,33 @@
-"""Built-in commands"""
+"""Built-in commands (grouped by domain)"""
 from .agents import agents_command
-from .clear import clear_command, ClearCommand
-from .exit import exit_command, ExitCommand
-from .help import help_command, HelpCommand
-from .mcpstatus import mcpstatus_command, McpStatusCommand
-from .models import models_command, ModelsCommand
-from .plan import plan_command
-from .prompt_cmd import prompt_command, PromptCommand
-from .reload import reload_command, ReloadCommand
-from .restore import restore_command
-from .sessions import sessions_command
-from .settings import settings_command, SettingsCommand
-from .tasks import tasks_command
-from .teams import teams_command, TeamsCommand
+from .session_cmds import (
+    sessions_command,
+    restore_command,
+    clear_command,
+    exit_command,
+    reload_command,
+    ClearCommand,
+    ExitCommand,
+    ReloadCommand,
+)
+from .mode_cmds import (
+    plan_command,
+    tasks_command,
+    models_command,
+    settings_command,
+    prompt_command,
+    ModelsCommand,
+    SettingsCommand,
+    PromptCommand,
+)
+from .info_cmds import (
+    help_command,
+    mcpstatus_command,
+    teams_command,
+    HelpCommand,
+    McpStatusCommand,
+    TeamsCommand,
+)
 
 __all__ = [
     "agents_command",

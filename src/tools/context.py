@@ -4,9 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-# ToolGate is now in src.permissions.gate for centralized permission management
-# This alias ensures backward compatibility with existing imports
-from src.permissions.gate import ToolGate
+# ToolGate lives in the permissions package (re-exported for convenience)
+from src.permissions import ToolGate
 
 
 @dataclass

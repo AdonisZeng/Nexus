@@ -107,7 +107,7 @@ class SubagentRunner:
         Returns:
             True if compression succeeded
         """
-        from src.context.core import LLMContextCompressor
+        from src.context.memory import LLMContextCompressor
         return await LLMContextCompressor.compress_context(context, self.adapter)
 
     def _create_isolated_context(self) -> AgentContext:

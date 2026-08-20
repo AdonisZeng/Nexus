@@ -9,6 +9,7 @@ from .provider import ModelProvider
 
 # Import all adapters to trigger __init_subclass__ auto-registration
 from .anthropic import AnthropicAdapter
+from .openai_compat import OpenAICompatAdapter
 from .openai import OpenAIAdapter
 from .ollama import OllamaAdapter
 from .lmstudio import LMStudioAdapter
@@ -20,6 +21,7 @@ __all__ = [
     "ModelAdapter",
     "ModelProvider",
     "AdapterRegistry",
+    "OpenAICompatAdapter",
     "AnthropicAdapter",
     "OpenAIAdapter",
     "OllamaAdapter",
@@ -27,16 +29,4 @@ __all__ = [
     "CustomAdapter",
     "XAIAdapter",
     "MinimaxAdapter",
-    "create_adapter",
 ]
-
-
-# ============================================================================
-# Backward Compatibility
-# ============================================================================
-def create_adapter(adapter_type: str, **kwargs) -> ModelAdapter:
-    """Factory function to create model adapters.
-
-    DEPRECATED: Use AdapterRegistry.create() instead.
-    """
-    return AdapterRegistry.create(adapter_type, kwargs)

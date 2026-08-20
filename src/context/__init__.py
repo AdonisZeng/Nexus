@@ -4,9 +4,6 @@ This module provides:
 - ContextMessage: Individual message with metadata
 - ConversationState: State tracking for the conversation
 - AgentContext: Main context container with short/long term memory
-- SkillMetadata: Metadata for skills
-- ContextCompressor: Context compression/summarization
-- SessionPersistence: Session save/load functionality
 - MemoryManager: Persistent memory management in ~/.nexus/memory
 - get_user_memory_dir: Get the memory directory path
 
@@ -22,13 +19,8 @@ from src.agent.context import (
     from_messages_list,
 )
 
-from .core import (
-    SkillMetadata,
-    ContextCompressor,
+from .memory import (
     LLMContextCompressor,
-    UnifiedContextCompressor,
-    get_unified_compressor,
-    SessionPersistence,
     SessionSummary,
     MemoryManager,
     get_user_memory_dir,
@@ -74,12 +66,7 @@ __all__ = [
     "ToolCallEntry",
     "ConversationState",
     "AgentContext",
-    "SkillMetadata",
-    "ContextCompressor",
     "LLMContextCompressor",
-    "UnifiedContextCompressor",
-    "get_unified_compressor",
-    "SessionPersistence",
     "SessionSummary",
     "MemoryManager",
     "get_user_memory_dir",

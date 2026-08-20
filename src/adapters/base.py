@@ -1,6 +1,8 @@
 """Model adapter base class"""
+import json
+import re
 from abc import ABC, abstractmethod
-from typing import Any, Optional, AsyncIterator, Dict
+from typing import Optional, AsyncIterator
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -9,6 +11,12 @@ from .capabilities import ModelCapabilities, merge_capabilities, infer_capabilit
 from src.utils import get_logger
 
 logger = get_logger("adapters.base")
+
+# XML closing tag built via concatenation to keep this file tooling-safe
+_TOOL_CALL_CLOSE = "</" + "tool_call>"
+_TOOL_CALL_PATTERN = re.compile(
+    r'<tool_call\s+name="([^"]+)">\s*([\s\S]*?)\s*' + re.escape(_TOOL_CALL_CLOSE)
+)
 
 
 class StreamEventType(Enum):
@@ -46,73 +54,6 @@ class ChatResult:
     text: str
     tool_calls: list[dict]
     stop_reason: Optional[str] = None  # "stop", "length", "tool_calls", etc.
-
-
-class StreamingToolCallBuffer:
-    """流式工具调用参数缓冲区
-
-    用于收集和修复流式响应中的不完整工具调用参数。
-    """
-
-    def __init__(self):
-        self.buffers: Dict[str, str] = {}  # tool_id -> partial_json
-        self.repaired: Dict[str, dict] = {}  # tool_id -> repaired_args
-
-    def append(self, tool_id: str, delta: str) -> None:
-        """追加增量内容
-
-        @param tool_id: Tool call ID
-        @param delta: Incremental content
-        """
-        self.buffers[tool_id] = self.buffers.get(tool_id, "") + delta
-
-    def try_repair(self, tool_id: str) -> Optional[dict]:
-        """尝试修复不完整的 JSON
-
-        @param tool_id: Tool call ID
-        @return: Repaired arguments or None
-        """
-        from .errors import try_repair_malformed_json
-
-        raw = self.buffers.get(tool_id, "")
-        if not raw:
-            return None
-
-        # Try to repair
-        result = try_repair_malformed_json(raw)
-        if result is not None:
-            self.repaired[tool_id] = result
-
-        return result
-
-    def finalize(self, tool_id: str) -> dict:
-        """最终化工具调用参数
-
-        @param tool_id: Tool call ID
-        @return: Finalized arguments
-        """
-        # Return repaired args, or try one last repair
-        if tool_id in self.repaired:
-            return self.repaired[tool_id]
-
-        result = self.try_repair(tool_id)
-        if result is not None:
-            return result
-
-        # Complete failure, return raw content
-        return {"__raw__": self.buffers.get(tool_id, ""), "__error__": "parse_failed"}
-
-    def clear(self, tool_id: str = None) -> None:
-        """清理缓冲区
-
-        @param tool_id: Specific tool ID to clear, or None to clear all
-        """
-        if tool_id:
-            self.buffers.pop(tool_id, None)
-            self.repaired.pop(tool_id, None)
-        else:
-            self.buffers.clear()
-            self.repaired.clear()
 
 
 class ModelAdapter(ABC):
@@ -207,6 +148,110 @@ class ModelAdapter(ABC):
         text, tool_calls = await self.chat_with_tools(messages, tools, system_prompt)
         return ChatResult(text=text, tool_calls=tool_calls, stop_reason=None)
 
+    async def close(self):
+        """Release the underlying HTTP client if any. Subclasses may override."""
+        client = getattr(self, "_client", None)
+        if client is not None and hasattr(client, "aclose"):
+            await client.aclose()
+            self._client = None
+
+    # ── Shared prompt-injection fallback (used when native tool calling fails) ──
+
+    def _build_tool_prompt(self, tools: list[dict]) -> str:
+        """Build the XML tool-calling prompt injected into the system prompt."""
+        tool_descriptions = []
+        for tool in tools:
+            schema = tool.get("input_schema", {})
+            props = schema.get("properties", {})
+            required = schema.get("required", [])
+
+            params_desc = []
+            for name, prop in props.items():
+                req = " (required)" if name in required else " (optional)"
+                params_desc.append(f"    - {name}{req}: {prop.get('description', prop.get('type', 'any'))}")
+
+            tool_descriptions.append(f"""
+- {tool.get('name', 'unnamed_tool')}: {tool.get('description', 'No description')}
+  Parameters:
+{chr(10).join(params_desc) if params_desc else '  (no parameters)'}
+""")
+
+        return f"""
+You have access to the following tools. To use a tool, respond with XML format:
+
+<tool_call name="tool_name">
+{{"param1": "value1", "param2": "value2"}}
+{_TOOL_CALL_CLOSE}
+
+You can make multiple tool calls by using multiple  <tool_call> blocks.
+
+Available tools:
+{''.join(tool_descriptions)}
+"""
+
+    def _parse_tool_calls_from_response(self, response: str) -> list[dict]:
+        """Parse <tool_call> blocks from a model response. Override for custom syntax."""
+        tool_calls = []
+        for match in _TOOL_CALL_PATTERN.finditer(response):
+            name = match.group(1)
+            args_str = match.group(2).strip()
+            try:
+                args = json.loads(args_str)
+            except json.JSONDecodeError:
+                args = {"raw": args_str}
+            tool_calls.append({
+                "name": name,
+                "arguments": args,
+                "id": f"prompt_{len(tool_calls)}",
+            })
+        return tool_calls
+
+    async def _chat_with_tool_prompt(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        system_prompt: str = None
+    ) -> tuple[str, list[dict]]:
+        """Fallback: use prompt injection for tool calling."""
+        tool_prompt = self._build_tool_prompt(tools)
+        enhanced_prompt = f"{system_prompt}\n\n{tool_prompt}" if system_prompt else tool_prompt
+
+        response = await self.chat(messages, enhanced_prompt)
+        tool_calls = self._parse_tool_calls_from_response(response)
+
+        return response, tool_calls
+
+    # ── Shared OpenAI-format tool_calls extraction ──
+
+    @staticmethod
+    def _extract_openai_tool_calls(message: dict) -> list[dict]:
+        """Extract tool calls from an OpenAI-format response message.
+
+        Handles malformed argument JSON via robust parsing and repair.
+        """
+        from src.error.json_repair import robust_json_parse, try_repair_malformed_json
+
+        tool_calls = []
+        for call in message.get("tool_calls", []):
+            func = call.get("function", {})
+            args = func.get("arguments", "{}")
+            if isinstance(args, str):
+                parsed = robust_json_parse(args)
+                if "__parse_error__" in parsed:
+                    repaired = try_repair_malformed_json(args)
+                    if repaired is not None:
+                        args = repaired
+                    else:
+                        args = {"raw": args}
+                else:
+                    args = parsed
+            tool_calls.append({
+                "name": func.get("name"),
+                "arguments": args,
+                "id": call.get("id") or f"call_{len(tool_calls)}",
+            })
+        return tool_calls
+
     @abstractmethod
     def get_name(self) -> str:
         """Return adapter name
@@ -241,7 +286,9 @@ class ModelAdapter(ABC):
         """
         # Default implementation falls back to non-streaming
         # Subclasses should override for actual streaming support
-        response, tool_calls = await self.chat_with_tools(messages, tools, system_prompt)
+        result = await self.chat_with_tools_and_stop_reason(messages, tools, system_prompt)
+        response = result.text
+        tool_calls = result.tool_calls
 
         # Emit text delta
         if response:
@@ -258,4 +305,4 @@ class ModelAdapter(ABC):
                     tool_calls=tool_calls
                 )
 
-        yield StreamEvent(type=StreamEventType.MESSAGE_STOP)
+        yield StreamEvent(type=StreamEventType.MESSAGE_STOP, stop_reason=result.stop_reason)

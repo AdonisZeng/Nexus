@@ -155,7 +155,7 @@ class AgentSession(ModelProvider):
     async def _compress_context_llm(self) -> bool:
         if not self.messages:
             return False
-        from src.context.core import LLMContextCompressor
+        from src.context.memory import LLMContextCompressor
         result = await LLMContextCompressor.compress_messages(self.messages, self.model_adapter)
         if result is not None:
             original_non_sys = sum(1 for m in self.messages if m.get("role") != "system")

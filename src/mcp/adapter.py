@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 from src.tools.registry import Tool
-from src.permissions.registry import HIGH_RISK_PREFIXES, WRITE_PREFIXES, READ_PREFIXES
+from src.permissions import HIGH_RISK_PREFIXES, WRITE_PREFIXES, READ_PREFIXES
 
 if TYPE_CHECKING:
     from src.mcp.router import MCPToolRouter
@@ -53,9 +53,9 @@ class MCPToolAdapter(Tool):
     def is_mutating(self) -> bool:
         """基于工具名前缀推断是否修改状态"""
         lowered = self._metadata.original_name.lower()
-        if lowered.startswith(self.HIGH_RISK_PREFIXES):
+        if lowered.startswith(HIGH_RISK_PREFIXES):
             return True
-        if lowered.startswith(self.WRITE_PREFIXES):
+        if lowered.startswith(WRITE_PREFIXES):
             return True
         return False
 

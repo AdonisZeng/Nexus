@@ -61,7 +61,7 @@ class MemoryConsolidator:
     ]
 
     def __init__(self, memory_dir: Optional[Path] = None):
-        from src.context.core import get_user_memory_dir
+        from src.context.memory import get_user_memory_dir
         self.memory_dir = memory_dir or get_user_memory_dir()
         self.entries_dir = self.memory_dir / "entries"
         self.session_dir = self.memory_dir / "session_entries"

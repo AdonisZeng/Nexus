@@ -5,7 +5,7 @@ from .registry import SubagentRegistry
 from .runner import SubagentRunner
 from .tool import SubagentTool, CheckSubagentTool, CancelSubagentTool
 from .hooks import HookDefinition, HookResult, HookManager, HookRunner
-from .permission import PermissionEnforcer, MUTATING_TOOLS, SAFE_TOOLS
+from src.permissions import MUTATING_TOOLS, SAFE_TOOLS
 from .parameter_validator import (
     ToolParameterValidator,
     ParameterConstraint,
@@ -40,7 +40,6 @@ __all__ = [
     "HookManager",
     "HookRunner",
     # Permission
-    "PermissionEnforcer",
     "MUTATING_TOOLS",
     "SAFE_TOOLS",
     # Parameter validation

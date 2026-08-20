@@ -18,21 +18,12 @@ import sys
 from pathlib import Path
 
 
-def get_exe_dir() -> Path:
-    """Get the directory where the exe/script is located
-
-    @return exe 或脚本所在目录路径
-    """
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent
-
-
 def get_default_config_path() -> str:
     """Get default config path based on running mode
 
     @return 配置文件的默认路径
     """
+    from src.bootstrap import get_exe_dir
     return str(get_exe_dir() / "config.yaml")
 
 

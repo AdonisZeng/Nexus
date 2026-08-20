@@ -1,7 +1,7 @@
 """Permission system module.
 
-This module provides unified permission management for tool execution,
-replacing scattered permission logic across SubagentRunner and other components.
+Unified permission management for tool execution.
+The entire implementation lives in core.py.
 
 Public API:
     PermissionChecker - Main permission checking class
@@ -9,21 +9,26 @@ Public API:
     PermissionResult - Result dataclass for permission checks
     PermissionRegistry - Tool classification (mutating vs safe)
     ToolGate - Synchronization primitive for mutating operations
-    LegacyPermissionEnforcer - Backward-compatible wrapper
     create_ask_user_callback - Factory for ASK mode user confirmation
 """
-from .ask_handler import (
-    create_ask_user_callback,
-    default_ask_user_callback,
+from .core import (
+    MUTATING_TOOLS,
+    SAFE_TOOLS,
+    HIGH_RISK_PREFIXES,
+    WRITE_PREFIXES,
+    READ_PREFIXES,
+    AskUserCallback,
+    PermissionChecker,
+    PermissionMode,
+    PermissionRegistry,
+    PermissionResult,
+    ToolGate,
     add_always_allow_rule,
     clear_always_allow_rules,
+    create_ask_user_callback,
+    default_ask_user_callback,
+    is_always_allowed,
 )
-from .checker import PermissionChecker
-from .gate import ToolGate
-from .legacy import LegacyPermissionEnforcer
-from .modes import PermissionMode
-from .registry import MUTATING_TOOLS, SAFE_TOOLS, PermissionRegistry
-from .result import PermissionResult
 
 __all__ = [
     # Core classes
@@ -32,13 +37,16 @@ __all__ = [
     "PermissionResult",
     "PermissionRegistry",
     "ToolGate",
-    # Backward compatibility
-    "LegacyPermissionEnforcer",
     "MUTATING_TOOLS",
     "SAFE_TOOLS",
+    "HIGH_RISK_PREFIXES",
+    "WRITE_PREFIXES",
+    "READ_PREFIXES",
+    "AskUserCallback",
     # ASK mode
     "create_ask_user_callback",
     "default_ask_user_callback",
     "add_always_allow_rule",
+    "is_always_allowed",
     "clear_always_allow_rules",
 ]

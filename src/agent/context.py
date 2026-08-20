@@ -1,10 +1,8 @@
 """
 Agent Context - Unified context management for Nexus Agent System
 
-This module provides the unified context data structure for all three agents:
-- agent-loop: Uses for iteration tracking and termination conditions
-- agent-context: Uses for message and memory management
-- agent-skills: Uses for skill execution context
+Provides the unified context data structure shared by agent loop,
+session and skill execution.
 """
 
 from dataclasses import dataclass, field
@@ -15,15 +13,7 @@ import uuid
 
 @dataclass
 class ContextMessage:
-    """Single message in the conversation.
-
-    Attributes:
-        role: Message role (user/assistant/system/tool)
-        content: Message content
-        timestamp: Unix timestamp when created
-        metadata: Additional metadata (tool_name, iteration, etc.)
-        token_count: Estimated token count for this message
-    """
+    """Single message in the conversation."""
     role: str  # user/assistant/system/tool
     content: str
     timestamp: float = field(default_factory=time.time)
@@ -76,17 +66,7 @@ class ToolCallEntry:
 
 @dataclass
 class ConversationState:
-    """State tracking for the conversation loop.
-
-    Attributes:
-        status: Current status (active/finished/error/timeout)
-        iteration: Current iteration count
-        max_iterations: Maximum allowed iterations
-        start_time: When the conversation started
-        should_terminate: Whether to terminate the loop
-        termination_reason: Why termination was requested
-        tool_call_history: All tool calls made
-    """
+    """State tracking for the conversation loop."""
     status: str = "active"  # active/finished/error/timeout/user_interrupted
     iteration: int = 0
     max_iterations: int = 10
@@ -180,20 +160,7 @@ class ConversationState:
 
 @dataclass
 class AgentContext:
-    """Main context container for the agent.
-
-    This is the unified context structure used by all three agents.
-
-    Attributes:
-        short_term_memory: Current conversation messages
-        long_term_memory: Persistent memory across sessions
-        state: Conversation loop state
-        total_tokens_used: Total tokens consumed
-        token_budget: Maximum allowed tokens
-        session_id: Unique session identifier
-        created_at: When this context was created
-        metadata: Additional metadata
-    """
+    """Main context container for the agent (messages, state, token budget)."""
     # Memory management
     short_term_memory: list[ContextMessage] = field(default_factory=list)
     long_term_memory: list[ContextMessage] = field(default_factory=list)
@@ -238,15 +205,9 @@ class AgentContext:
         metadata: Optional[dict] = None,
         token_count: int = None
     ) -> ContextMessage:
-        """Add a message to short_term_memory.
-
-        Note: token_count is optional but recommended. If not provided,
-        the message will still be added but won't contribute to token statistics.
-        """
+        """Add a message to short_term_memory (token_count optional)."""
         if token_count is None:
             token_count = 0
-            # Note: In production, consider using a tokenizer to calculate token_count
-            # when it's not provided, to ensure accurate tracking.
         msg = ContextMessage(
             role=role,
             content=content,
@@ -282,14 +243,7 @@ class AgentContext:
         self.total_tokens_used = 0
 
     def calculate_total_tokens(self, messages: list[dict] = None) -> int:
-        """Calculate total tokens for current messages or provided messages.
-
-        Args:
-            messages: Optional list of message dicts. If None, uses short_term_memory.
-
-        Returns:
-            Total token count
-        """
+        """Calculate total tokens for current or provided messages."""
         from src.utils.tokenizer import count_messages_tokens
 
         if messages is None:
@@ -299,14 +253,7 @@ class AgentContext:
         return total
 
     def should_compress(self, current_tokens: int = None) -> bool:
-        """Check if context should be compressed based on threshold.
-
-        Args:
-            current_tokens: Token count. If None, will calculate automatically.
-
-        Returns:
-            True if compression is recommended (>= 70% of max_context_window)
-        """
+        """Check if context usage reaches the compression threshold (70%)."""
         if current_tokens is None:
             current_tokens = self.calculate_total_tokens()
 
@@ -314,14 +261,7 @@ class AgentContext:
         return current_tokens >= threshold_tokens
 
     def get_compression_ratio(self, current_tokens: int = None) -> float:
-        """Get current usage ratio of context window.
-
-        Args:
-            current_tokens: Token count. If None, will calculate automatically.
-
-        Returns:
-            Ratio (0.0 to 1.0+) of context window usage
-        """
+        """Get current usage ratio of context window."""
         if current_tokens is None:
             current_tokens = self.calculate_total_tokens()
 

@@ -6,7 +6,7 @@ from typing import Callable, Awaitable, Optional
 from dataclasses import dataclass, field
 
 from src.agent import AgentEvent, EventType, WorkItemSource, WorkItem
-from src.todo.manager import TodoManager
+from src.tools.todo import TodoManager
 
 logger = logging.getLogger("Nexus")
 
